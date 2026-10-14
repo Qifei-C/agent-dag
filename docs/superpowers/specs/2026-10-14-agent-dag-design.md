@@ -261,7 +261,7 @@ redraws the pane. A dim count on the right: `3 agents · 1 running`.
 
 - Hooks on gating events (`agent.spawn`, `tool.call`, `session.send`,
   `command.run`) never return without `next` except `command.run` for our own
-  command. Each is registered with `.catch(($, e, next) => next.called ? next(e) : next(e))`
+  command. Each is registered with `.catch(($, e, next) => next(e))`
   so a failure in our bookkeeping is skipped and the event proceeds untouched.
 - The `ui.render` hook wraps drawing in a try; on failure it returns a
   single dim row `agent-dag: draw failed (<message>)` instead of throwing, so
