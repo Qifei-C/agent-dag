@@ -9,8 +9,12 @@ const PANE_PROPS = {
 const boot = async ($: any, on: any, opts: { width?: number } = {}) => {
   const clock = mock.clock(on, { now: 10_000 })
   const opened: string[] = []
+  const closed: string[] = []
   const listed: any[] = []
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('ui.close', (_: any, e: any) => { closed.push(e.id); return { value: undefined } })
+  on('ui.panes', () => ({ value: opened.length > closed.length
+    ? [{ id: 'agent-dag', title: 'Agents', isShown: true, isFocused: false, isPlaced: true }] : [] }))
   on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
   on('ui.open', (_: any, e: any) => { opened.push(e.id); return { value: { isPlaced: true } } })
   on('agent.list', () => ({ value: listed }))
@@ -20,7 +24,7 @@ const boot = async ($: any, on: any, opts: { width?: number } = {}) => {
   on('tool.call', () => ({ result: 'ok', text: 'ok', isError: false }))
   on('session.send', () => ({ isDelivered: true }))
   await $.session.start({ cwd: '/tmp/x', surface: 'terminal', isInteractive: true })
-  return { clock, opened, listed }
+  return { clock, opened, closed, listed }
 }
 
 const rowsOf = async (ui: any) =>
@@ -138,5 +142,64 @@ describe('agent-dag options', () => {
     const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
     expect(await ui.find({ type: 'Text', text: /0 turns/ })).toBeDefined()
     await ui.unmount()
+  })
+})
+describe('/dag command', () => {
+  test('bare /dag toggles the pane', async ($, on) => {
+    const { opened, closed } = await boot($, on)
+    const a = await $.command.run({ command: 'dag', args: '' })
+    expect(opened).toEqual(['agent-dag'])
+    expect(a.text).toMatch(/opened/)
+    const b = await $.command.run({ command: 'dag', args: '' })
+    expect(closed).toEqual(['agent-dag'])
+    expect(b.text).toMatch(/closed/)
+  })
+
+  test('/dag inspect prints the tree and messages as text', async ($, on) => {
+    await boot($, on)
+    await $.agent.spawn({ prompt: 'x', description: 'find callers', subagentType: 'Explore', name: 'a1' })
+    await $.session.send({ to: 'a1', text: 'go' })
+    const out = await $.command.run({ command: 'dag', args: 'inspect' })
+    expect(out.text).toMatch(/main/)
+    expect(out.text).toMatch(/Explore: find callers/)
+    expect(out.text).toMatch(/messages/)
+    expect(out.text).toMatch(/main → find callers/)   // message rows use bare labels
+  })
+
+  test('/dag reset forgets agents but keeps main', async ($, on) => {
+    await boot($, on)
+    await $.agent.spawn({ prompt: 'x', description: 'a', subagentType: 'Explore', name: 'a1' })
+    const out = await $.command.run({ command: 'dag', args: 'reset' })
+    expect(out.text).toBe('Agent graph reset.')
+    const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /No agents yet/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('/dag with an unknown argument answers usage', async ($, on) => {
+    await boot($, on)
+    const out = await $.command.run({ command: 'dag', args: 'bogus' })
+    expect(out.text).toMatch(/usage: \/dag \[inspect\|reset\]/i)
+  })
+
+  test("a deliberate close suppresses auto-open until /dag", async ($, on) => {
+    // The kit's $ cannot raise ui.close with origin person; the /dag close
+    // goes through the same suppression, so the rule is exercised through it.
+    const { opened, closed } = await boot($, on)
+    await $.agent.spawn({ prompt: 'x', description: 'a', subagentType: 'Explore', name: 'a1' })
+    expect(opened).toEqual(['agent-dag'])
+    await $.command.run({ command: 'dag', args: '' })   // closes
+    expect(closed).toEqual(['agent-dag'])
+    await $.agent.spawn({ prompt: 'x', description: 'b', subagentType: 'Explore', name: 'a2' })
+    expect(opened).toEqual(['agent-dag'])
+    await $.command.run({ command: 'dag', args: '' })   // reopens
+    expect(opened).toEqual(['agent-dag', 'agent-dag'])
+  })
+
+  test('a second spawn after the first auto-open does not reopen', async ($, on) => {
+    const { opened } = await boot($, on)
+    await $.agent.spawn({ prompt: 'x', description: 'a', subagentType: 'Explore', name: 'a1' })
+    await $.agent.spawn({ prompt: 'x', description: 'b', subagentType: 'Explore', name: 'a2' })
+    expect(opened).toEqual(['agent-dag'])
   })
 })

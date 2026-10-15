@@ -119,6 +119,32 @@ export const register: Register = (on, rawOptions) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  on('command.run', { command: 'dag' }, async ($, e) => {
+    const arg = (e.args ?? '').trim().toLowerCase()
+    const now = await $.clock.now()
+    if (arg === 'inspect') {
+      const s = await read($, dag)
+      const o = { columns: 80, glyphs: options.glyphs, now }
+      const msgs = messageRows(s, o)
+      const rows = [...treeRows(s, o), ...(msgs.length ? [[{ text: '' }], ...msgs] : [])]
+      return { text: '```\n' + plainText(rows) + '\n```' }
+    }
+    if (arg === 'reset') {
+      await dispatch($, { kind: 'reset', at: now })
+      return { text: 'Agent graph reset.' }
+    }
+    if (arg !== '') return { text: 'usage: /dag [inspect|reset]' }
+    const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
+    if (isOpen) {
+      // A close the person asked for: no auto-reopen until they ask again.
+      await dispatch($, { kind: 'set-flags', isClosedByPerson: true })
+      await $.ui.close({ id: PANE })
+      return { text: 'Agents pane closed.' }
+    }
+    await openPane($, options, true)
+    return { text: 'Agents pane opened.' }
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const s = await read($, dag)
