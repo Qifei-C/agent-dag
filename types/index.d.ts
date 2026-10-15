@@ -48,6 +48,8 @@ export type DagState = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'agent-dag': { dag: DagState }
+    // Shaped: the atom carries a shape tag, so a reload whose code names a
+    // new tag starts fresh instead of reading an old layout.
+    'agent-dag': { dag: Shaped<DagState> }
   }
 }

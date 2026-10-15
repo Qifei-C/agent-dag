@@ -17,7 +17,7 @@ const PANE_PROPS = {
 }
 
 /** Registers the bottom hooks a session would answer, and starts the session. */
-const boot = async ($: any, on: any, opts: { width?: number } = {}) => {
+const boot = async ($: any, on: any, opts: { placed?: boolean } = {}) => {
   const clock = mock.clock(on, { now: 10_000 })
   const opened: string[] = []
   const closed: string[] = []
@@ -25,7 +25,7 @@ const boot = async ($: any, on: any, opts: { width?: number } = {}) => {
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('ui.close', (_: any, e: any) => { closed.push(e.id); return { value: undefined } })
   on('ui.panes', () => ({ value: opened.length > closed.length
-    ? [{ id: 'agent-dag', title: 'Agents', isShown: true, isFocused: false, isPlaced: true }] : [] }))
+    ? [{ id: 'agent-dag', title: 'Agents', isShown: true, isFocused: false, isPlaced: opts.placed ?? true }] : [] }))
   on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
   on('ui.open', (_: any, e: any) => { opened.push(e.id); return { value: { isPlaced: true } } })
   on('agent.list', () => ({ value: listed }))
@@ -212,5 +212,17 @@ describe('/dag command', () => {
     await $.agent.spawn(spawnOf({ description: 'a', subagentType: 'Explore', name: 'a1' }))
     await $.agent.spawn(spawnOf({ description: 'b', subagentType: 'Explore', name: 'a2' }))
     expect(opened).toEqual(['agent-dag'])
+  })
+})
+
+describe('/dag on a pane the engine holds undrawn', () => {
+  test('/dag re-opens (asked) instead of closing a pane nobody can see', async ($, on) => {
+    const { opened, closed } = await boot($, on, { placed: false })
+    await $.agent.spawn(spawnOf({ description: 'a', subagentType: 'Explore', name: 'a1' }))   // unasked open: waits undrawn
+    expect(opened).toEqual(['agent-dag'])
+    const out = await $.command.run(runOf(''))
+    expect(out.text).toMatch(/opened/)
+    expect(closed).toEqual([])
+    expect(opened).toEqual(['agent-dag', 'agent-dag'])
   })
 })

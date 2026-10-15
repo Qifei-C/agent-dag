@@ -20,8 +20,10 @@ messages
 
 ## Use
 
-- The pane opens by itself the first time the session spawns an agent (in
-  fullscreen mode from 110 columns; narrower terminals wait until you ask).
+- The pane opens by itself the first time the session spawns an agent. The
+  engine only seats an unasked pane on a wide terminal (144 columns, or 110
+  once you have opened it by hand); narrower than that it waits until you
+  run `/dag`, which seats it at any width.
 - `/dag` opens or closes the pane. `/dag inspect` prints the tree into the
   transcript. `/dag reset` clears it.
 - With the pane focused (click it, or ctrl+x then tab): `v` switches between
@@ -29,6 +31,9 @@ messages
   tool chips on cards. Arrow keys scroll.
 
 ## Options (`/config`)
+
+The tokens column counts every input token (uncached, cache reads and cache
+writes) plus output, since Claude Code agents run mostly on cached input.
 
 | Option | Values | Default |
 | --- | --- | --- |

@@ -136,12 +136,12 @@ must read a result awaits `next(e)` first and does bookkeeping after, in a
 | `session.start` | Create `main` (status `idle`), register `/dag`, start the tick timer. |
 | `agent.spawn` | After `next(e)` resolves with `agentId`: upsert node with parent `e.parentAgentId ?? 'main'`, label from `e.description` (fallback `e.name`, then `e.subagentType`), type, `isTeammate`, `workflowRunId` from `e.workflow?.runId`, model from the result, status `pending`. A `resume` reuses the node and sets `pending`. A `deny` result adds nothing. |
 | `turn.start` | Node `e.agentId ?? 'main'`: status `running`, `turns += 1`. |
-| `tool.call` | Before `next`: node `e.agentId ?? 'main'`: `currentTool = e.tool`. After: `toolCount += 1`, push to `recentTools` (cap 6), clear `currentTool` if it still equals this call's tool. |
-| `turn.complete` | Node `e.agentId ?? 'main'`: add `e.usage` tokens; status by reason: `answer` → `completed` for a subagent, `idle` for a teammate and for `main`; `aborted` → `killed`; `error` or `refusal` → `failed`. Set `endedAt`. |
+| `tool.call` | Before `next`: node `e.agentId ?? 'main'`: `currentTool = e.tool`. After: `toolCount += 1`, push to `recentTools` (cap 6), clear `currentTool` if it still equals this call's tool. A tool event for an id with no node is ignored: the engine's own forks (compaction, memory) carry ids no list names, and `turn.start` or reconcile is what creates a node. |
+| `turn.complete` | Node `e.agentId ?? 'main'`: add `e.usage` tokens (input = `input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens`, since `input_tokens` alone is only the uncached part of the prompt); status by reason: `answer` → `completed` for a subagent, `idle` for a teammate and for `main`; `aborted` → `killed`; `error` or `refusal` → `failed`. Set `endedAt`. |
 | `session.send` | After `next(e)` resolves `isDelivered`: edge from `e.agentId ?? 'main'` to the node whose `id`, `name` or `teammateId` equals `e.to` (else the raw `e.to`), `count += 1`, `lastText`. |
 | `ui.close` for our pane | If `e.origin.kind === 'person'`, set `isClosedByPerson`. |
 | `session.end` reason `clear` | Reset the model to a fresh `main`. |
-| tick (every 1 s while any node is `running` or `pending`, else every 10 s) | Bump `tick`; reconcile with `$.agent.list()`: for each listed agent, take the list's status when it is `waiting`, `idle`, `completed`, `failed` or `killed` and ours is not ended, and fill `name`/`teammateId` we lack. Nodes the list no longer has keep their last status. |
+| tick (every 1 s; a no-op read while the tree holds only `main`; `tick` bumped only while a node is `running` or `pending`; reconcile every 5th tick) | Bump `tick`; reconcile with `$.agent.list()`: for each listed agent, take the list's status when it is `waiting`, `idle`, `completed`, `failed` or `killed` and ours is not ended, or `running` when ours is `pending` or `waiting`; fill `name`/`teammateId` we lack; fill a placeholder's label, type and parent from the list; never create a node for a listed agent that has already ended (so `/dag reset` holds). Nodes the list no longer has keep their last status. |
 
 The tick timer is started in `session.start` with `$.clock.every`, so it
 survives the dispatch and dies with the module. It re-arms itself at the
@@ -149,8 +149,11 @@ slower interval when nothing is active to stay cheap.
 
 Auto-open: on the first `agent.spawn` of the session, if the pane is not open
 and `isClosedByPerson` is false, `$.ui.open({ id: 'agent-dag', title: 'Agents' })`.
-Unasked opens are placed by the engine only from 110 columns in fullscreen,
-and wait otherwise; that is the engine's rule and the mod does not fight it.
+The engine seats an unasked open only from 144 columns (110 once the person
+has opened that id by hand) and otherwise holds it open but undrawn
+(`isPlaced: false`). `/dag` therefore treats the pane as open only when it is
+placed and shown; an undrawn pane is re-opened as asked, which seats it at any
+width, rather than closed.
 
 ## Rendering
 
@@ -268,7 +271,10 @@ redraws the pane. A dim count on the right: `3 agents · 1 running`.
   the engine's own fallback is never needed and the pane stays informative.
 - A `$.agent.list()` rejection in the tick is ignored until the next tick.
 - Unknown node ids (an event for an agent we never saw spawn, such as a
-  forked skill) create the node on the fly with label `type` and parent `main`.
+  forked skill) create the node on the fly at `turn.start` (status `running`,
+  label `agent`, parent `main`); the next reconcile fills its label, type and
+  parent from `$.agent.list()`. A spawn whose bookkeeping lands after the
+  agent's first `turn.start` keeps the running status, clock and tool.
 - `$.state` writes go through `update($, atom, fn)` with a functional update,
   so concurrent events do not clobber each other.
 

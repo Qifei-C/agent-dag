@@ -14,7 +14,7 @@ const TICK_MS = 1000
 const RECONCILE_EVERY = 5
 const CARDS_MIN_COLUMNS = 44
 
-export const dag = atom({ plugin: 'agent-dag', key: 'dag' } as const, freshState(0, 'tree'))
+export const dag = atom({ plugin: 'agent-dag', key: 'dag' } as const, freshState(0, 'tree'), { shape: 'v1' })
 
 type Options = { glyphs: GlyphSet; autoOpen: boolean; defaultView: View }
 
@@ -134,7 +134,9 @@ export const register: Register = (on, rawOptions) => {
       return { text: 'Agent graph reset.' }
     }
     if (arg !== '') return { text: 'usage: /dag [inspect|reset]' }
-    const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
+    // Open means drawn: an unasked open below the engine's width floor waits
+    // undrawn, and the person's /dag must then seat it, not close it.
+    const isOpen = (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced && p.isShown)
     if (isOpen) {
       // A close the person asked for: no auto-reopen until they ask again.
       await dispatch($, { kind: 'set-flags', isClosedByPerson: true })

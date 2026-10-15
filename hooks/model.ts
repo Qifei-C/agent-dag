@@ -81,7 +81,10 @@ export const shortModel = (id: string | undefined): string => {
   return last.slice(0, 8)
 }
 
-const placeholder = (id: string, at: number, parentId = MAIN, label = 'agent', type = 'agent'): AgentNode => ({
+/** The type of a node created before its spawn was seen; reconcile fills it in. */
+const PLACEHOLDER_TYPE = 'agent'
+
+const placeholder = (id: string, at: number, parentId = MAIN, label = 'agent', type = PLACEHOLDER_TYPE): AgentNode => ({
   id, parentId, label, type, isTeammate: false, status: 'pending', startedAt: at,
   turns: 0, inputTokens: 0, outputTokens: 0, toolCount: 0, recentTools: [],
 })
@@ -112,24 +115,32 @@ export const apply = (s: DagState, ev: DagEvent): DagState => {
   switch (ev.kind) {
     case 'spawn': {
       const base = ensure(ensure(s, ev.parentId, ev.at), ev.agentId, ev.at, ev.parentId)
-      return patch(base, ev.agentId, n => ({
-        ...n, parentId: ev.parentId, label: ev.label, type: ev.type, isTeammate: ev.isTeammate,
-        name: ev.name ?? n.name, teammateId: ev.teammateId ?? n.teammateId,
-        workflowRunId: ev.workflowRunId ?? n.workflowRunId, model: ev.model ?? n.model,
-        status: 'pending', startedAt: ev.at, endedAt: undefined, currentTool: undefined,
-      }))
+      return patch(base, ev.agentId, n => {
+        // The spawn's bookkeeping can land after the agent's first turn.start:
+        // a loop already running keeps its status, tool, clock and turn count.
+        const isLive = n.status === 'running' || n.status === 'waiting'
+        return {
+          ...n, parentId: ev.parentId, label: ev.label, type: ev.type, isTeammate: ev.isTeammate,
+          name: ev.name ?? n.name, teammateId: ev.teammateId ?? n.teammateId,
+          workflowRunId: ev.workflowRunId ?? n.workflowRunId, model: ev.model ?? n.model,
+          status: isLive ? n.status : 'pending',
+          startedAt: isLive ? n.startedAt : ev.at,
+          endedAt: undefined,
+          currentTool: isLive ? n.currentTool : undefined,
+        }
+      })
     }
     case 'turn-start': {
       const id = loopId(ev.agentId)
       return patch(ensure(s, id, ev.at), id, n => ({ ...n, status: 'running', turns: n.turns + 1, endedAt: undefined }))
     }
-    case 'tool-start': {
-      const id = loopId(ev.agentId)
-      return patch(ensure(s, id, 0), id, n => ({ ...n, currentTool: ev.tool }))
-    }
+    // Tool events never create a node: the engine's own forks (compaction,
+    // memory) carry agent ids no list names and would become phantom rows.
+    case 'tool-start':
+      return patch(s, loopId(ev.agentId), n => ({ ...n, currentTool: ev.tool }))
     case 'tool-end': {
       const id = loopId(ev.agentId)
-      return patch(ensure(s, id, 0), id, n => ({
+      return patch(s, id, n => ({
         ...n,
         toolCount: n.toolCount + 1,
         recentTools: [...n.recentTools, ev.tool].slice(-RECENT_TOOLS),
@@ -143,7 +154,11 @@ export const apply = (s: DagState, ev: DagEvent): DagState => {
         status: endStatus(n, ev.reason),
         endedAt: ev.at,
         currentTool: undefined,
-        inputTokens: n.inputTokens + (ev.usage?.input_tokens ?? 0),
+        // input_tokens alone is only the uncached part of the prompt.
+        inputTokens: n.inputTokens
+          + (ev.usage?.input_tokens ?? 0)
+          + (ev.usage?.cache_read_input_tokens ?? 0)
+          + (ev.usage?.cache_creation_input_tokens ?? 0),
         outputTokens: n.outputTokens + (ev.usage?.output_tokens ?? 0),
       }))
     }
@@ -161,11 +176,20 @@ export const apply = (s: DagState, ev: DagEvent): DagState => {
     case 'reconcile': {
       let out = s
       for (const a of ev.agents) {
+        // The engine keeps finished agents listed for a while: never create a
+        // node for one (a /dag reset or /clear would be undone), only update.
+        if (!out.nodes[a.id] && ENDED.has(a.status)) continue
         out = ensure(out, a.id, ev.at, a.parentId ?? MAIN, a.description || a.name || a.type, a.type)
         out = patch(out, a.id, n => {
-          const takes = a.status !== 'running' && a.status !== 'pending' && !ENDED.has(n.status)
+          const isPlaceholder = n.type === PLACEHOLDER_TYPE
+          const settles = a.status !== 'running' && a.status !== 'pending' && !ENDED.has(n.status)
+          const wakes = a.status === 'running' && (n.status === 'pending' || n.status === 'waiting')
+          const takes = settles || wakes
           return {
             ...n,
+            label: isPlaceholder ? a.description || a.name || a.type || n.label : n.label,
+            type: isPlaceholder && a.type ? a.type : n.type,
+            parentId: isPlaceholder && a.parentId ? a.parentId : n.parentId,
             name: n.name ?? a.name,
             teammateId: n.teammateId ?? a.teammateId,
             status: takes ? a.status : n.status,
