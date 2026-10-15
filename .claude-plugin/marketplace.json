@@ -1,0 +1,5 @@
+{
+  "name": "qifei-c",
+  "owner": { "name": "Qifei-C" },
+  "plugins": [{ "name": "agent-dag", "source": "./" }]
+}

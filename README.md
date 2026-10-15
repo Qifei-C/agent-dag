@@ -45,14 +45,23 @@ Pick `ascii` if your font lacks `✓ ✗ ⊘ ◐`.
 
 ## Install
 
-From a terminal session's prompt, once this folder is published as a
-marketplace (see the plugin-authoring skill's "Sharing a mod"):
+At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install agent-dag --marketplace <owner>/<repo>
+/plugin install agent-dag --marketplace qifei-c/agent-dag
 ```
 
-While developing: `claude --plugin-dir /path/to/agent-dag`.
+Answer `y` to add the marketplace, then pick a scope (user scope installs it
+for every session). The mod is active at once; no restart.
+
+From a shell:
+
+```
+claude plugin marketplace add qifei-c/agent-dag
+claude plugin install agent-dag@qifei-c
+```
+
+To run a checkout without installing: `claude --plugin-dir /path/to/agent-dag`.
 
 ## Develop
 
