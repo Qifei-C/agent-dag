@@ -1,0 +1,30 @@
+{
+  "name": "agent-dag",
+  "version": "0.1.0",
+  "description": "Live tree of the session's agents, their status, cost, current tool and messages, in a docked pane",
+  "author": { "name": "SOMA Robotics IT" },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "glyphs": {
+      "type": "string",
+      "title": "Glyph set",
+      "description": "unicode draws box-drawing connectors and shaped status marks; ascii uses plain characters for fonts without them",
+      "options": ["unicode", "ascii"],
+      "default": "unicode"
+    },
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open on first agent",
+      "description": "Open the Agents pane when the session spawns its first agent",
+      "default": true
+    },
+    "defaultView": {
+      "type": "string",
+      "title": "Default view",
+      "description": "The view the pane starts in",
+      "options": ["tree", "cards"],
+      "default": "tree"
+    }
+  }
+}
