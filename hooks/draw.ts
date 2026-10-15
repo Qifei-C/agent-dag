@@ -79,6 +79,14 @@ const itemsUnder = (s: DagState, id: string, depth: number, trail: boolean[]): I
 
 const flatten = (items: Item[]): Item[] => items.flatMap(it => [it, ...flatten(it.kids)])
 
+/** The main loop's item with the whole tree beneath it. */
+const rootItem = (s: DagState): Item => {
+  const main = s.nodes[MAIN]
+  const root: Item = { id: MAIN, label: 'main', status: main?.status ?? 'idle', node: main, depth: 0, isLast: true, trail: [], kids: [] }
+  root.kids = itemsUnder(s, MAIN, 1, [true])
+  return root
+}
+
 const connector = (it: Item, g: typeof GLYPHS.unicode): string => {
   if (it.depth === 0) return ''
   const lead = it.trail.slice(1).map(more => (more ? g.pipe : g.blank)).join('')
@@ -89,9 +97,7 @@ const statusSeg = (st: AgentStatus, text: string): Segment => ({ text, ...STATUS
 
 export const treeRows = (s: DagState, o: LayoutOptions): Row[] => {
   const g = GLYPHS[o.glyphs]
-  const main = s.nodes[MAIN]
-  const root: Item = { id: MAIN, label: 'main', status: main.status, node: main, depth: 0, isLast: true, trail: [], kids: [] }
-  root.kids = itemsUnder(s, MAIN, 1, [true])
+  const root = rootItem(s)
   const items = flatten([root])
   const cols = visibleColumns(o.columns)
   const ell = ellipsisOf(o.glyphs)
@@ -135,9 +141,7 @@ export const cards = (s: DagState, o: LayoutOptions): Card[] => {
   const g = GLYPHS[o.glyphs]
   const dot = o.glyphs === 'ascii' ? ' - ' : ' · '
   const ell = ellipsisOf(o.glyphs)
-  const main = s.nodes[MAIN]
-  const root: Item = { id: MAIN, label: 'main', status: main.status, node: main, depth: 0, isLast: true, trail: [], kids: [] }
-  root.kids = itemsUnder(s, MAIN, 1, [true])
+  const root = rootItem(s)
   return flatten([root]).map(it => {
     const inner = o.columns - 4 - 2 * it.depth
     const n = it.node
@@ -190,7 +194,7 @@ export const messageRows = (s: DagState, o: LayoutOptions): Row[] => {
 
 export const summary = (s: DagState, glyphs: GlyphSet): string => {
   const agents = s.order.filter(id => id !== MAIN)
-  const running = agents.filter(id => s.nodes[id].status === 'running').length
+  const running = agents.filter(id => s.nodes[id]?.status === 'running').length
   const sep = glyphs === 'ascii' ? ' - ' : ' · '
   return `${agents.length} agent${agents.length === 1 ? '' : 's'}${sep}${running} running`
 }

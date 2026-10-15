@@ -14,7 +14,7 @@ const TICK_MS = 1000
 const RECONCILE_EVERY = 5
 const CARDS_MIN_COLUMNS = 44
 
-export const dag = atom({ plugin: 'agent-dag', key: 'dag' } as const, freshState(0, 'tree'), { shape: 'v1' })
+export const dag = atom({ plugin: 'agent-dag', key: 'dag' } as const, freshState(0, 'tree'))
 
 type Options = { glyphs: GlyphSet; autoOpen: boolean; defaultView: View }
 

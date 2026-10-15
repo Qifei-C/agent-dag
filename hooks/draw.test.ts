@@ -105,7 +105,7 @@ describe('treeRows', () => {
 
   test('status rows carry the status color', async () => {
     const rows = treeRows(sample(), o(100))
-    const glyph = rows[4].find(seg => seg.text.includes('✗'))
+    const glyph = rows[4]!.find(seg => seg.text.includes('✗'))
     expect(glyph?.color).toBe('error')
   })
 })
@@ -114,19 +114,19 @@ describe('cards', () => {
   test('one card per node with three inner rows and tool chips', async () => {
     const cs = cards(sample(), o(80))
     expect(cs).toHaveLength(5)
-    expect(cs[2].depth).toBe(1)
-    expect(cs[2].status).toBe('running')
-    const inner = cs[2].rows.map(r => r.map(s => s.text).join(''))
+    expect(cs[2]!.depth).toBe(1)
+    expect(cs[2]!.status).toBe('running')
+    const inner = cs[2]!.rows.map(r => r.map(s => s.text).join(''))
     expect(inner[0]).toMatch(/^◐ fork: review diff/)
     expect(inner[1]).toMatch(/running 31s · fable · 0 · 1 turn/)
     expect(inner[2]).toMatch(/▸ Bash/)
-    expect(cs[3].depth).toBe(2)
+    expect(cs[3]!.depth).toBe(2)
     for (const c of cs) for (const r of c.rows) expect([...r.map(s => s.text).join('')].length).toBeLessThanOrEqual(80 - 4 - 2 * c.depth)
   })
 
   test('tool chips row is omitted when showTools is false', async () => {
     const s = apply(sample(), { kind: 'set-flags', showTools: false })
-    expect(cards(s, o(80))[2].rows).toHaveLength(2)
+    expect(cards(s, o(80))[2]!.rows).toHaveLength(2)
   })
 })
 

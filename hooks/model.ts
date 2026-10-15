@@ -60,12 +60,15 @@ export const freshState = (now: number, view: View): DagState => ({
 export const isActive = (s: DagState): boolean =>
   Object.values(s.nodes).some(n => n.status === 'running' || n.status === 'pending')
 
+const nodesInOrder = (s: DagState): AgentNode[] =>
+  s.order.flatMap(k => (s.nodes[k] ? [s.nodes[k] as AgentNode] : []))
+
 export const children = (s: DagState, id: string): AgentNode[] =>
-  s.order.map(k => s.nodes[k]).filter(n => n && n.id !== MAIN && (n.parentId ?? MAIN) === id)
+  nodesInOrder(s).filter(n => n.id !== MAIN && (n.parentId ?? MAIN) === id)
 
 export const resolveAddress = (s: DagState, to: string): string => {
   if (s.nodes[to]) return to
-  const hit = s.order.map(k => s.nodes[k]).find(n => n.name === to || n.teammateId === to)
+  const hit = nodesInOrder(s).find(n => n.name === to || n.teammateId === to)
   return hit ? hit.id : to
 }
 
@@ -94,9 +97,10 @@ const ensure = (s: DagState, id: string, at: number, parentId = MAIN, label?: st
   }
 }
 
-const patch = (s: DagState, id: string, fn: (n: AgentNode) => AgentNode): DagState => ({
-  ...s, nodes: { ...s.nodes, [id]: fn(s.nodes[id]) },
-})
+const patch = (s: DagState, id: string, fn: (n: AgentNode) => AgentNode): DagState => {
+  const n = s.nodes[id]
+  return n ? { ...s, nodes: { ...s.nodes, [id]: fn(n) } } : s
+}
 
 const endStatus = (n: AgentNode, reason: 'answer' | 'aborted' | 'error' | 'refusal'): AgentStatus => {
   if (reason === 'aborted') return 'killed'
@@ -147,10 +151,11 @@ export const apply = (s: DagState, ev: DagEvent): DagState => {
       const to = resolveAddress(s, ev.to)
       const text = ev.text.replace(/\s+/g, ' ').trim().slice(0, LAST_TEXT)
       const i = s.messages.findIndex(m => m.from === ev.from && m.to === to)
-      const edge: MessageEdge = i < 0
-        ? { from: ev.from, to, count: 1, lastAt: ev.at, lastText: text }
-        : { ...s.messages[i], count: s.messages[i].count + 1, lastAt: ev.at, lastText: text }
-      const messages = i < 0 ? [...s.messages, edge] : s.messages.map((m, k) => (k === i ? edge : m))
+      const prev = i < 0 ? undefined : s.messages[i]
+      const edge: MessageEdge = prev
+        ? { ...prev, count: prev.count + 1, lastAt: ev.at, lastText: text }
+        : { from: ev.from, to, count: 1, lastAt: ev.at, lastText: text }
+      const messages = prev ? s.messages.map((m, k) => (k === i ? edge : m)) : [...s.messages, edge]
       return { ...s, messages }
     }
     case 'reconcile': {
