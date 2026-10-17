@@ -1,32 +1,33 @@
 # agent-dag
 
-A Claude Code mod that shows the session's agents as a live tree in a docked
-pane: who spawned whom, status, elapsed time, tokens, model, the tool running
-now, and which agents have messaged each other. Our own take on dsh-task-dag
-and zoetrope, drawn by Claude Code itself, so it works in any terminal that
-runs Claude Code's fullscreen TUI (Ghostty, kitty, iTerm2, Terminal.app,
-GNOME Terminal, tmux) under any shell.
+Local coordination for independent agent sessions in tmux.
 
-The optional `dag` CLI companion adds a shared registry and recorded messaging
-for independent tmux sessions. The Claude pane shows the local agent tree;
-`dag sessions --watch` shows the cross-session overview.
+Create and register sessions, send recorded messages, and follow their status
+from one terminal. Each session has a stable identity and inbox, so agents can
+find each other by name and preserve pending messages across reconnections.
+
+The `dag` CLI works with agent processes launched in tmux. A Claude Code plugin
+adds a live view of the agents running inside a single session and a skill for
+using the CLI. The CLI can be used on its own.
 
 ```
-◐ main                           running  1m02s   12.4k  fable   Agent
-├─✓ Explore: find callers        done       12s    4.1k  haiku
-├─◐ fork: review diff            running    31s    8.0k  fable   Bash
-│ └─◌ Plan: outline fix          pending     4s       0  sonnet
-└─✗ run tests                    failed     40s    2.2k  sonnet
-
-messages
-  review diff → main       1  "done, three callers found"
+$ dag sessions
+SESSION                  STATUS    QUEUED  PANE    ROLE
+builder                  busy      0       %1      implementation
+  reviewer               ready     0       %2      review
+  tester                 busy      2       %3      tests
 ```
 
-## Coordinate tmux sessions
+`dag` coordinates tmux sessions. `/dag` controls the agent tree inside a Claude
+Code session.
 
-Requires Node.js 20+ and tmux. From this checkout:
+## Install the CLI
+
+Requires Node.js 20+ and tmux.
 
 ```sh
+git clone https://github.com/Qifei-C/agent-dag.git
+cd agent-dag
 npm run install:cli
 dag --help
 ```
@@ -34,7 +35,10 @@ dag --help
 The installer links `~/.local/bin/dag` to this checkout without replacing an
 existing command. Keep the checkout in place. You can also run `./bin/dag`
 directly or choose a bin directory with `npm run install:cli -- /path/to/bin`.
-Installing the Claude plugin alone does not install the shell command.
+If needed, add `~/.local/bin` to your shell's `PATH`. Installing the Claude Code
+plugin alone does not install the CLI.
+
+## Create and register sessions
 
 Create and register an independent agent session:
 
@@ -65,6 +69,8 @@ same name and pane. `dag register NAME --target %PANE --replace` moves an offlin
 session to a new pane, preserving its ID and inbox. Readiness resets to unknown.
 Pane bindings and server sockets are checked before injection, including after
 tmux server restarts, so a recycled pane ID is not sufficient to receive input.
+
+## Send and receive messages
 
 Messages are durable and queued by default:
 
@@ -104,11 +110,13 @@ read the durable inbox entry, then acknowledge it before declaring readiness
 again. If an acknowledged message still needs action, handle its content in the
 current turn. Offline receivers retain their queued messages.
 
+## Session overview and storage
+
 `dag sessions` renders the parent/child session tree with readiness, liveness,
 queued counts, pane IDs, and roles. `--watch` refreshes it every two seconds;
 `--json` is available on data commands. The plugin's `session-coordination` skill
-documents the agent workflow. To use the new skill before publishing/updating
-the installed plugin, launch Claude with this checkout, for example
+documents the agent workflow. To load the skill from a checkout, launch Claude
+with that checkout, for example
 `dag create reviewer -- claude --plugin-dir /path/to/agent-dag`.
 Cross-session tool/token telemetry and automatic
 task scheduling are not part of this release.
@@ -123,7 +131,45 @@ lock, dead owners are recovered. A crash between creating the lock directory and
 writing its owner can leave an empty `DAG_HOME/lock`; remove that empty directory
 with `rmdir` if no CLI operation is running.
 
-## Use the Claude pane
+## Command reference
+
+Core CLI commands:
+
+| Command | Purpose |
+| --- | --- |
+| `dag create NAME -- COMMAND` | Create and register a detached tmux session. |
+| `dag register NAME` | Register the current tmux pane. |
+| `dag send NAME TEXT` | Queue a message for a registered session. |
+| `dag inbox [NAME]` | Read messages for the current or named session. |
+| `dag ack ID` | Confirm receipt in the current session. |
+| `dag ready [NAME]` | Permit one queued or future terminal injection. |
+| `dag busy [NAME]` | Queue messages without injecting terminal input. |
+| `dag messages` | Show the complete message history. |
+| `dag sessions --watch` | Follow session status and queued counts. |
+| `dag attach NAME` | Focus a registered session's pane. |
+
+Run `dag --help` for command arguments. For an agent workflow, see the
+[session-coordination skill](skills/session-coordination/SKILL.md).
+
+## Claude Code plugin
+
+The plugin displays the session's agents as a live tree in a docked pane:
+who spawned whom, status, elapsed time, tokens, model, current tool, and messages
+between agents. The pane uses Claude Code's renderer in supported terminals,
+including tmux.
+
+```
+◐ main                           running  1m02s   12.4k  fable   Agent
+├─✓ Explore: find callers        done       12s    4.1k  haiku
+├─◐ fork: review diff            running    31s    8.0k  fable   Bash
+│ └─◌ Plan: outline fix          pending     4s       0  sonnet
+└─✗ run tests                    failed     40s    2.2k  sonnet
+
+messages
+  review diff → main       1  "done, three callers found"
+```
+
+### Use the pane
 
 - The pane opens by itself the first time the session spawns an agent. The
   engine only seats an unasked pane on a wide terminal (144 columns, or 110
@@ -135,7 +181,7 @@ with `rmdir` if no CLI operation is running.
   the tree and the cards view, `m` folds the messages section, `t` hides the
   tool chips on cards. Arrow keys scroll.
 
-## Options (`/config`)
+### Options (`/config`)
 
 The tokens column counts every input token (uncached, cache reads and cache
 writes) plus output, since Claude Code agents run mostly on cached input.
@@ -148,7 +194,7 @@ writes) plus output, since Claude Code agents run mostly on cached input.
 
 Pick `ascii` if your font lacks `✓ ✗ ⊘ ◐`.
 
-## Install
+### Install the plugin
 
 At the prompt of a Claude Code terminal session:
 
@@ -157,7 +203,7 @@ At the prompt of a Claude Code terminal session:
 ```
 
 Answer `y` to add the marketplace, then pick a scope (user scope installs it
-for every session). The mod is active at once; no restart.
+for every session).
 
 From a shell:
 

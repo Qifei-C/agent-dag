@@ -1,5 +1,6 @@
 {
   "name": "qifei-c",
+  "description": "Local agent session coordination in tmux with recorded messaging and a Claude Code agent tree",
   "owner": { "name": "Qifei-C" },
   "plugins": [{ "name": "agent-dag", "source": "./" }]
 }

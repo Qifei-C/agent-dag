@@ -1,7 +1,7 @@
 {
   "name": "agent-dag",
   "version": "0.2.0",
-  "description": "Live in-session agent tree, with an optional dag CLI for tmux session creation, registration and recorded messaging",
+  "description": "Agent session coordination in tmux: a dag CLI for session creation and recorded messaging, plus a live Claude Code agent tree",
   "author": { "name": "SOMA Robotics IT" },
   "license": "MIT",
   "types": "./types/index.d.ts",
