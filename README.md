@@ -6,16 +6,18 @@ Create and register sessions, send recorded messages, and follow their status
 from one terminal. Each session has a stable identity and inbox, so agents can
 find each other by name and preserve pending messages across reconnections.
 
-The `dag` CLI works with agent processes launched in tmux. A Claude Code plugin
-adds a live view of the agents running inside a single session and a skill for
+The `dag` CLI works with agent processes launched in tmux. Its Codex adapter
+provides native message delivery and live runtime telemetry. `dag view` renders
+the shared card/tree dashboard in a terminal or a separate tmux pane. A Claude
+Code plugin adds a live view of the agents running inside a single session and a skill for
 using the CLI. The CLI can be used on its own.
 
 ```
 $ dag sessions
-SESSION                  STATUS    QUEUED  PANE    ROLE
-builder                  busy      0       %1      implementation
-  reviewer               ready     0       %2      review
-  tester                 busy      2       %3      tests
+SESSION                  STATUS    QUEUED  PANE    ADAPTER  ACTIVITY   ROLE
+builder                  busy      0       %1      tmux     -          implementation
+  reviewer               ready     0       %2      codex    running    review
+  tester                 busy      2       %3      tmux     -          tests
 ```
 
 `dag` coordinates tmux sessions. `/dag` controls the agent tree inside a Claude
@@ -28,6 +30,7 @@ Requires Node.js 20+ and tmux.
 ```sh
 git clone https://github.com/Qifei-C/agent-dag.git
 cd agent-dag
+npm install
 npm run install:cli
 dag --help
 ```
@@ -70,6 +73,68 @@ session to a new pane, preserving its ID and inbox. Readiness resets to unknown.
 Pane bindings and server sockets are checked before injection, including after
 tmux server restarts, so a recycled pane ID is not sufficient to receive input.
 
+## Codex adapter
+
+Tested with Codex CLI 0.163.0. Requires native `codex queue` and App Server Unix
+socket support, plus the normal Codex sign-in/provider setup.
+
+```sh
+dag create coder --adapter codex --cwd /path/to/project --role implementation -- codex
+dag send coder 'Inspect the current diff and report findings' --key review-42
+dag view --pane
+```
+
+The adapter starts a private local App Server, creates the thread, persists its
+coordination context without inference, binds its exact ID, and opens the native
+Codex TUI. It preserves normal Codex approval and sandbox settings. Closing the
+session also shuts down its private server. A command named `codex` selects this
+adapter automatically; `dag create coder --adapter codex` uses the default Codex
+executable. Pass a quoted initial prompt after Codex options to start a task.
+The managed session stays bound to that thread. To work in another thread, create
+another DAG session rather than switching the managed TUI with `/new` or `/fork`.
+
+Codex messages use the native queue, including while a turn is active. They do
+not use terminal key injection or require `dag ready` for each message.
+`submitted` means Codex accepted the message into its queue; the receiving agent
+still uses `dag ack ID` to acknowledge receipt. `dag busy coder` pauses DAG
+delivery, and `dag ready coder` resumes and drains it. An uncertain submission is
+never automatically retried or sent through a tmux fallback.
+
+When an agent invokes `dag` through a Codex shell tool, its sandbox policy still
+applies to registry files and local sockets. Use normal Codex approvals for any
+required access; the adapter does not broaden execution permissions.
+
+Common interactive options such as `-m`, `-c`, `--sandbox`, and `--add-dir` pass
+through to Codex. Managed mode owns the App Server, directory and thread, so raw
+subcommands, `--remote`, profiles, and managed worktrees are rejected explicitly.
+Use `--adapter tmux` when you want to run those commands directly instead.
+
+For an existing Codex pane, run these from a Codex shell tool:
+
+```sh
+dag register coder
+dag bind coder
+```
+
+`bind` reads `CODEX_THREAD_ID` inside Codex. From another shell, supply the exact
+ID and, if needed, `--codex-socket PATH` and `--codex-bin PATH`. Binding checks the
+thread ID and working directory, and rejects an ID already bound elsewhere.
+`DAG_CODEX_SOCKET` overrides the default local control socket, and `DAG_CODEX_BIN`
+selects the executable for new managed sessions. A replaced offline pane loses
+its old thread binding before it can receive native messages.
+
+The Codex plugin compatibility manifest packages the shared coordination skill
+without loading Claude's function hooks. To install it from this checkout:
+
+```sh
+codex plugin marketplace add /path/to/agent-dag
+codex plugin add agent-dag@qifei-c
+```
+
+Installing the skill is optional for managed startup: the new thread also gets a
+reference to its coordination guide. CLI installation and dependencies are still
+required on the machine that runs the agents.
+
 ## Send and receive messages
 
 Messages are durable and queued by default:
@@ -89,7 +154,7 @@ the same sender, receiver, and payload. `--file PATH` reads message text from a
 file (maximum 16 KiB). Inbox polling plus acknowledgement handles queued messages
 in an agent's current turn without writing to its terminal.
 
-To accept a new prompt through tmux instead:
+For terminal-based delivery through the tmux adapter:
 
 ```sh
 dag ready reviewer
@@ -112,21 +177,43 @@ current turn. Offline receivers retain their queued messages.
 
 ## Session overview and storage
 
-`dag sessions` renders the parent/child session tree with readiness, liveness,
-queued counts, pane IDs, and roles. `--watch` refreshes it every two seconds;
+`dag sessions` renders the parent/child session tree with delivery status,
+liveness, queued counts, pane IDs, adapters, runtime activity, and roles.
+`STATUS` is delivery readiness; `ACTIVITY` is observed Codex runtime state.
+`--watch` refreshes it every two seconds;
 `--json` is available on data commands. The plugin's `session-coordination` skill
 documents the agent workflow. To load the skill from a checkout, launch Claude
 with that checkout, for example
 `dag create reviewer -- claude --plugin-dir /path/to/agent-dag`.
-Cross-session tool/token telemetry and automatic
-task scheduling are not part of this release.
+Codex model, turn, tool, token and child-agent events are collected for managed
+sessions even when the dashboard is closed. Historical turn/tool counts are not
+backfilled; token updates are cumulative snapshots and cached tokens are not
+added twice. Existing bound Codex threads are observed while the dashboard is
+open, using a `thread/resume` subscription without configuration overrides.
+Claude's internal tool/token telemetry remains in its embedded pane. The shared
+dashboard shows its registered session and DAG messages. Task scheduling remains
+manual.
+
+```sh
+dag view                       # interactive card/tree dashboard
+dag view --pane                # open a separate tmux pane
+dag view --once                 # print a snapshot
+dag view --once --json          # read the graph as JSON
+```
+
+In the dashboard, `v` switches density, `m` toggles messages, `t` toggles tool
+details, arrow keys scroll, and `q` exits. Native Codex permissions and questions
+remain in its own TUI; the observer does not approve requests. Offline panes and
+unavailable telemetry are marked explicitly.
 
 State lives in `~/.local/state/agent-dag/state.json`. All participating sessions
 must use the same `DAG_HOME` (or `--home DIR`). Writes are atomic and serialized
 across CLI processes. State files are private to the local user and contain full
 message text. Use `DAG_TMUX_SOCKET` or `--socket PATH` for creation/registration
 on another local tmux server; each registered session keeps its resolved socket.
-No daemon or network service is needed. If a process dies holding the registry
+The registry needs no shared coordinator daemon. Managed Codex sessions own
+private App Servers on local Unix sockets. Server logs are private files under
+`DAG_HOME/codex-SESSION_ID.log`. If a process dies holding the registry
 lock, dead owners are recovered. A crash between creating the lock directory and
 writing its owner can leave an empty `DAG_HOME/lock`; remove that empty directory
 with `rmdir` if no CLI operation is running.
@@ -139,6 +226,7 @@ Core CLI commands:
 | --- | --- |
 | `dag create NAME -- COMMAND` | Create and register a detached tmux session. |
 | `dag register NAME` | Register the current tmux pane. |
+| `dag bind [NAME]` | Bind a registered pane to its exact Codex thread. |
 | `dag send NAME TEXT` | Queue a message for a registered session. |
 | `dag inbox [NAME]` | Read messages for the current or named session. |
 | `dag ack ID` | Confirm receipt in the current session. |
@@ -146,6 +234,7 @@ Core CLI commands:
 | `dag busy [NAME]` | Queue messages without injecting terminal input. |
 | `dag messages` | Show the complete message history. |
 | `dag sessions --watch` | Follow session status and queued counts. |
+| `dag view [--pane]` | Open the shared card/tree dashboard. |
 | `dag attach NAME` | Focus a registered session's pane. |
 
 Run `dag --help` for command arguments. For an agent workflow, see the
@@ -248,10 +337,16 @@ claude plugin validate .
 claude plugin test .
 ```
 
-CLI tests use real processes and temporary, isolated tmux servers; they never
-send input to existing sessions. Run them in an environment that permits local
-Unix sockets and pseudo-terminals.
+CLI tests use real processes, temporary isolated tmux servers and a local Codex
+protocol fixture; they never send input to existing sessions or invoke a real
+model. Run them in an environment that permits local Unix sockets and
+pseudo-terminals. `npm install` builds the shared renderer; after changing the
+layout, run `npm run build` (also run automatically before CLI tests).
 
 `hooks/model.ts` is the pure reducer, `hooks/draw.ts` the pure layout,
 `hooks/register.tsx` the only file that talks to the engine. `cli/` is the
 standalone companion; it does not run in the plugin's restricted hook runtime.
+`cli/layout-entry.ts` bundles the same pure renderer for `dag view`.
+
+Protocol references: [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+and [plugin packaging](https://developers.openai.com/plugins/build/plugins).

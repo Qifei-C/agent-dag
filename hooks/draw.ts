@@ -85,7 +85,7 @@ const flatten = (items: Item[]): Item[] => items.flatMap(it => [it, ...flatten(i
 /** The main loop's item with the whole tree beneath it. */
 const rootItem = (s: DagState): Item => {
   const main = s.nodes[MAIN]
-  const root: Item = { id: MAIN, label: 'main', status: main?.status ?? 'idle', node: main, depth: 0, isLast: true, trail: [], kids: [] }
+  const root: Item = { id: MAIN, label: main ? labelOf(main) : 'main', status: main?.status ?? 'idle', node: main, depth: 0, isLast: true, trail: [], kids: [] }
   root.kids = itemsUnder(s, MAIN, 1, [true])
   return root
 }
@@ -134,7 +134,7 @@ export const treeRows = (s: DagState, o: LayoutOptions): Row[] => {
     if (cols.status) push(wStatus, STATUS_WORD[it.status], STATUS_COLOR[it.status])
     push(wElapsed, n ? fmtElapsed(elapsedOf(n, o.now)) : '', { dim: true })
     if (cols.tokens) push(wTokens, n ? fmtTokens(n.inputTokens + n.outputTokens) : '', { dim: true })
-    if (cols.model) push(wModel, n ? shortModel(n.model) : '', { dim: true })
+    if (cols.model) push(wModel, n ? fit(shortModel(n.model), wModel - 1, ell).trimEnd() : '', { dim: true })
     if (cols.tool) push(wTool, n?.currentTool ? fit(n.currentTool, wTool - 1, ell).trimEnd() : '', { color: 'claude' })
     return row
   })

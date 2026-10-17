@@ -2,3 +2,5 @@
 .superpowers/
 *.log
 .DS_Store
+node_modules/
+cli/layout.mjs

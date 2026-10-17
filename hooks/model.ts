@@ -79,6 +79,7 @@ export const shortModel = (id: string | undefined): string => {
     if (id.includes(family)) return family
   }
   const last = id.split('/').pop() ?? id
+  if (last.startsWith('gpt-')) return last.slice(4, 12)
   return last.slice(0, 8)
 }
 

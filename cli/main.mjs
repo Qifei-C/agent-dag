@@ -8,9 +8,11 @@ import { Tmux } from './tmux.mjs';
 
 const HELP = `dag — tmux sessions and recorded agent messages
 
-  dag create NAME [--cwd DIR] [--role TEXT] [--parent NAME|none] [-- COMMAND ...]
+  dag create NAME [--adapter tmux|codex] [--cwd DIR] [--role TEXT] [--parent NAME|none] [-- COMMAND ...]
   dag register NAME [--target PANE] [--role TEXT] [--parent NAME|none] [--replace]
+  dag bind [NAME] [--thread ID] [--codex-socket PATH] [--codex-bin PATH]
   dag sessions [--watch]
+  dag view [--pane] [--compact] [--ascii] [--once]
   dag send NAME TEXT [--from NAME] [--reply-to ID] [--key KEY]
   dag send NAME --file PATH [--from NAME] [--reply-to ID]
   dag inbox [NAME] [--all]
@@ -22,6 +24,7 @@ const HELP = `dag — tmux sessions and recorded agent messages
 
 Options: --json, --home DIR, --socket PATH, --help
 Environment: DAG_HOME, DAG_TMUX_SOCKET, DAG_SESSION_ID
+Codex: DAG_CODEX_BIN, DAG_CODEX_SOCKET, CODEX_THREAD_ID, CODEX_HOME
 
 create starts a detached tmux session (default: your shell). Commands after --
 are executed as argv, not shell text. New sessions start with unknown readiness.
@@ -30,12 +33,17 @@ busy again. ack confirms receipt, not task completion. inbox never injects input
 Session and message IDs are stable; duplicate session names are rejected.
 --key makes send retries idempotent for a sender/receiver pair.
 register --replace preserves an offline session's identity and inbox on a new pane.
+The codex adapter creates a private local App Server and connects the native TUI.
+Codex messages use its native queue; busy pauses delivery, ready drains it.
+bind connects an existing registered pane to an exact Codex thread ID.
 `;
 
 const option = type => ({ type });
 const OPTIONS = {
-  create: { cwd: option('string'), role: option('string'), parent: option('string') },
+  create: { cwd: option('string'), role: option('string'), parent: option('string'), adapter: option('string') },
   register: { target: option('string'), role: option('string'), parent: option('string'), replace: option('boolean') },
+  bind: { thread: option('string'), 'codex-socket': option('string'), 'codex-bin': option('string') },
+  view: { pane: option('boolean'), compact: option('boolean'), ascii: option('boolean'), once: option('boolean') },
   sessions: { watch: option('boolean') },
   send: { from: option('string'), 'reply-to': option('string'), file: option('string'), key: option('string') },
   inbox: { all: option('boolean') },
@@ -47,13 +55,13 @@ const OPTIONS = {
 const printable = text => String(text).replace(/[\p{Cc}\p{Cf}]/gu, ' ');
 function rows(sessions) {
   if (!sessions.length) return 'No registered sessions. Run dag create NAME -- COMMAND.';
-  const out = ['SESSION                  STATUS    QUEUED  PANE    ROLE'];
+  const out = ['SESSION                  STATUS    QUEUED  PANE    ADAPTER  ACTIVITY   ROLE'];
   const visited = new Set();
   const walk = (s, depth) => {
     if (visited.has(s.id)) return;
     visited.add(s.id);
     const label = `${'  '.repeat(depth)}${s.name}`;
-    out.push(`${printable(label).padEnd(25)}${s.status.padEnd(10)}${String(s.pending).padEnd(8)}${s.pane.padEnd(8)}${printable(s.role)}`);
+    out.push(`${printable(label).padEnd(25)}${s.status.padEnd(10)}${String(s.pending).padEnd(8)}${s.pane.padEnd(8)}${(s.adapter || 'tmux').padEnd(9)}${(s.activity || '-').padEnd(11)}${printable(s.role)}`);
     for (const child of sessions.filter(x => x.parentId === s.id)) walk(child, depth + 1);
   };
   for (const s of sessions.filter(s => !sessions.some(p => p.id === s.parentId))) walk(s, 0);
@@ -97,7 +105,8 @@ export async function main(args) {
   });
   if (opts.help) { console.log(HELP); return; }
   if (opts.watch && opts.json) throw new Error('--watch and --json cannot be combined.');
-  const range = { create: [1, 1], register: [1, 1], sessions: [0, 0], send: [1, opts.file ? 1 : 2],
+  if (command === 'view' && (opts.pane && opts.once || opts.json && !opts.once && !opts.pane)) throw new Error('Use view --json with --once or --pane; --pane cannot combine with --once.');
+  const range = { create: [1, 1], register: [1, 1], bind: [0, 1], view: [0, 0], sessions: [0, 0], send: [1, opts.file ? 1 : 2],
     inbox: [0, 1], ack: [1, 1], ready: [0, 1], busy: [0, 1], attach: [1, 1], messages: [0, 0] }[command];
   if (pos.length < range[0] || pos.length > range[1] || (command === 'send' && !opts.file && pos.length !== 2)) {
     throw new Error(`Invalid arguments for ${command}. Run dag --help.`);
@@ -107,6 +116,18 @@ export async function main(args) {
   switch (command) {
     case 'create': result = await service.create(pos[0], { ...opts, command: launch }); break;
     case 'register': result = await service.register(pos[0], opts); break;
+    case 'bind': result = await service.bindCodex(pos[0], {
+      threadId: opts.thread || process.env.CODEX_THREAD_ID, socketPath: opts['codex-socket'], executable: opts['codex-bin'],
+      inferred: !opts.thread,
+    }); await service.flush(result.name); break;
+    case 'view': {
+      const { runDashboard, openDashboardPane } = await import('./dashboard.mjs');
+      if (opts.pane) {
+        const pane = openDashboardPane(service, opts);
+        console.log(opts.json ? JSON.stringify({ pane }) : `Dashboard opened in ${pane}`);
+      } else await runDashboard(service, opts);
+      return;
+    }
     case 'sessions': {
       if (opts.watch && !process.stdout.isTTY) throw new Error('--watch needs an interactive terminal.');
       do {

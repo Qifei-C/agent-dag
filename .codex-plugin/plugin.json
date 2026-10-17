@@ -1,0 +1,7 @@
+{
+  "name": "agent-dag",
+  "version": "0.3.0",
+  "description": "Create Codex tmux sessions, exchange recorded messages through the native queue, and view agent activity in a shared terminal dashboard",
+  "skills": "./skills/",
+  "hooks": []
+}

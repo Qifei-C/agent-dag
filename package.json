@@ -1,15 +1,29 @@
 {
   "name": "agent-dag",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "Local tmux session registry and messaging companion for agent-dag",
+  "description": "Agent session coordination in tmux with a native Codex adapter and live card/tree dashboard",
   "type": "module",
-  "bin": { "dag": "./bin/dag" },
-  "engines": { "node": ">=20" },
+  "bin": {
+    "dag": "./bin/dag"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
+    "build": "esbuild cli/layout-entry.ts --bundle --platform=node --format=esm --target=node20 --tsconfig=cli/tsconfig.json --outfile=cli/layout.mjs",
+    "prepare": "npm run build",
+    "pretest": "npm run build",
+    "preinstall:cli": "npm run build",
     "install:cli": "node cli/install.mjs",
     "test": "node --test test/*.test.mjs",
     "test:plugin": "claude plugin test .",
-    "check": "node --check bin/dag && node --check cli/main.mjs && node --check cli/service.mjs && node --check cli/store.mjs && node --check cli/tmux.mjs && node --check cli/install.mjs"
+    "check": "node --check bin/dag && node --check cli/main.mjs && node --check cli/service.mjs && node --check cli/store.mjs && node --check cli/tmux.mjs && node --check cli/install.mjs && node --check cli/codex.mjs && node --check cli/codex-events.mjs && node --check cli/codex-rpc.mjs && node --check cli/codex-launch.mjs && node --check cli/dashboard.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

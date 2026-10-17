@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { stat, realpath } from 'node:fs/promises';
-import { resolve, delimiter } from 'node:path';
+import { resolve, delimiter, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from './store.mjs';
 import { Tmux } from './tmux.mjs';
+import { CodexAdapter, validateBinding } from './codex.mjs';
+import { applyCodexEvent } from './codex-events.mjs';
 
 const BIN = fileURLToPath(new URL('../bin/', import.meta.url));
 const now = () => new Date().toISOString();
@@ -20,9 +22,10 @@ export function findSession(state, ref) {
 }
 
 export class Service {
-  constructor({ store = new Store(), tmux = new Tmux() } = {}) {
+  constructor({ store = new Store(), tmux = new Tmux(), codex = new CodexAdapter() } = {}) {
     this.store = store;
     this.tmux = tmux;
+    this.codex = codex;
   }
 
   current(state, explicit, optional = false) {
@@ -43,7 +46,7 @@ export class Service {
     return ref === 'none' ? undefined : this.current(state, ref, true)?.id;
   }
 
-  async create(name, { cwd = process.cwd(), role = '', parent, command = [] } = {}) {
+  async create(name, { cwd = process.cwd(), role = '', parent, command = [], adapter } = {}) {
     validName(name);
     cwd = await realpath(resolve(cwd));
     if (!(await stat(cwd)).isDirectory()) throw new Error(`Not a directory: ${cwd}`);
@@ -51,21 +54,31 @@ export class Service {
       if (state.sessions.some(s => s.name === name)) throw new Error(`Session name already registered: ${name}`);
       const id = randomUUID();
       const parentId = this.parent(state, parent);
-      const launch = command.length ? command : [process.env.SHELL || '/bin/sh'];
+      const launch = command.length ? command : [adapter === 'codex' ? process.env.DAG_CODEX_BIN || 'codex' : process.env.SHELL || '/bin/sh'];
+      adapter ||= basename(launch[0]) === 'codex' ? 'codex' : 'tmux';
+      if (!['tmux', 'codex'].includes(adapter)) throw new Error('Adapter must be tmux or codex.');
+      if (adapter === 'codex') {
+        const { parseCodexLaunch } = await import('./codex-launch.mjs');
+        parseCodexLaunch(launch); // Validate before starting any tmux process.
+      }
+      const executable = adapter === 'codex'
+        ? [process.execPath, fileURLToPath(new URL('./codex-launch.mjs', import.meta.url)), JSON.stringify(launch)] : launch;
       // env + argv forces tmux's direct-exec path, including a one-word command.
       // Do not inherit a parent's DAG identity into a newly created session.
       const output = this.tmux.run(['new-session', '-d', '-P', '-F', '#{pane_id}',
         '-s', name, '-c', cwd,
         '-e', `DAG_SESSION_ID=${id}`, '-e', `DAG_HOME=${this.store.home}`,
         '-e', `PATH=${BIN}${delimiter}${process.env.PATH || ''}`,
-        'env', '-u', 'DAG_TMUX_SOCKET', '-u', 'CLAUDECODE', `DAG_SESSION_ID=${id}`, `DAG_HOME=${this.store.home}`,
-        `PATH=${BIN}${delimiter}${process.env.PATH || ''}`, ...launch]);
+        'env', '-u', 'DAG_TMUX_SOCKET', '-u', 'CLAUDECODE', '-u', 'CODEX_THREAD_ID', '-u', 'CODEX_HOME',
+        ...(process.env.CODEX_HOME ? [`CODEX_HOME=${resolve(process.env.CODEX_HOME)}`] : []),
+        `DAG_SESSION_ID=${id}`, `DAG_HOME=${this.store.home}`,
+        `PATH=${BIN}${delimiter}${process.env.PATH || ''}`, ...executable]);
       const pane = this.tmux.pane(output);
       const tmux = new Tmux(pane.socket_path);
       const session = {
         id, name, role, cwd, parentId, socket: pane.socket_path,
         tmuxSession: pane.session_id, tmuxName: pane.session_name, pane: pane.pane_id,
-        command: launch, status: 'unknown', createdAt: now(), updatedAt: now(),
+        command: launch, adapter, status: 'unknown', createdAt: now(), updatedAt: now(),
       };
       // Keep a discoverable record if binding fails; never kill an agent that
       // may already have started useful work merely to roll back registration.
@@ -105,6 +118,9 @@ export class Service {
         Object.assign(session, { socket: pane.socket_path, pane: pane.pane_id,
           tmuxSession: pane.session_id, tmuxName: pane.session_name,
           cwd: pane.pane_current_path, status: 'unknown' });
+        // A new terminal must not inherit the previous process's native thread.
+        delete session.codex;
+        if (state.observations) delete state.observations[session.id];
       }
       if (session.parentId === session.id) throw new Error('Session cannot be its own parent.');
       if (role !== undefined) session.role = role;
@@ -121,6 +137,8 @@ export class Service {
     return state.sessions.map(s => {
       const live = this.tmux.inspect(s);
       return { ...s, online: live.online, status: live.online ? s.status : 'offline',
+        activity: state.observations?.[s.id]?.nodes?.[s.codex?.threadId]?.status,
+        model: state.observations?.[s.id]?.nodes?.[s.codex?.threadId]?.model,
         error: live.error,
         pending: state.messages.filter(m => m.to === s.id && m.status === 'queued').length };
     });
@@ -156,21 +174,33 @@ export class Service {
   }
 
   async deliverOne(state, session) {
-    if (session.status !== 'ready') return;
+    const native = session.adapter === 'codex';
+    if (native ? !session.codex || session.deliveryPaused : session.status !== 'ready') return;
+    if (state.messages.some(m => m.to === session.id && ['sending', 'uncertain'].includes(m.status))) return;
     const message = state.messages.find(m => m.to === session.id && m.status === 'queued');
     if (!message || !this.tmux.inspect(session).online) return;
     // Commit before sending. A crash can leave 'sending', which requires
     // acknowledgement rather than blind replay and duplicate terminal input.
-    session.status = 'busy';
+    if (!native) session.status = 'busy';
     session.updatedAt = now();
     message.status = 'sending';
     message.attemptedAt = now();
     await this.store.save(state);
     const envelope = `[dag id=${message.id} from=${message.fromName}${message.replyTo ? ` reply-to=${message.replyTo}` : ''}] ${JSON.stringify(message.text)} | acknowledge: dag ack ${message.id}`;
     try {
-      await this.tmux.inject(session, envelope);
-      message.status = 'injected';
-      message.injectedAt = now();
+      if (native) {
+        const instructions = `\nDAG session: ${session.name}. Coordination guide: ${fileURLToPath(new URL('../skills/session-coordination/SKILL.md', import.meta.url))}. `
+          + `Use dag with --home ${JSON.stringify(this.store.home)}; acknowledge this message with --session ${session.name}.`;
+        await this.codex.submit(session.codex, envelope + instructions);
+        message.status = 'submitted';
+        message.submittedAt = now();
+        message.transport = 'codex';
+      } else {
+        await this.tmux.inject(session, envelope);
+        message.status = 'injected';
+        message.injectedAt = now();
+        message.transport = 'tmux';
+      }
     } catch (error) {
       message.status = 'uncertain';
       message.error = error.message;
@@ -186,9 +216,17 @@ export class Service {
         throw new Error('An earlier delivery is unconfirmed. Inspect dag inbox and acknowledge it before accepting another.');
       }
       session.status = status;
+      if (session.adapter === 'codex') session.deliveryPaused = status === 'busy';
       session.updatedAt = now();
       await this.store.save(state);
-      if (status === 'ready') await this.deliverOne(state, session);
+      if (status === 'ready') {
+        for (;;) {
+          const before = state.messages.filter(m => m.to === session.id && m.status === 'queued').length;
+          await this.deliverOne(state, session);
+          const after = state.messages.filter(m => m.to === session.id && m.status === 'queued').length;
+          if (session.adapter !== 'codex' || after === before || after === 0) break;
+        }
+      }
       return session;
     });
   }
@@ -217,5 +255,42 @@ export class Service {
     const live = this.tmux.inspect(session);
     if (!live.online) throw new Error('Session pane is offline or its binding has changed.');
     return { socket: session.socket, session: live.pane.session_id, pane: session.pane };
+  }
+
+  async bindCodex(ref, options = {}) {
+    return this.store.locked(async state => {
+      const session = this.current(state, ref);
+      if (options.inferred && this.current(state, undefined, true)?.id !== session.id) {
+        throw new Error('Cannot infer a thread for another pane. Run bind inside the receiving session, or specify --thread ID.');
+      }
+      if (!this.tmux.inspect(session).online) throw new Error('Cannot bind an offline pane.');
+      const { binding, thread } = await validateBinding(this.codex, state, session, {
+        ...options, socketPath: options.socketPath || session.codex?.socketPath,
+        executable: options.executable || session.codex?.executable,
+        codexHome: session.codex?.codexHome,
+      });
+      if (session.codex && (session.codex.threadId !== binding.threadId || session.codex.socketPath !== binding.socketPath)) {
+        throw new Error('Session is already bound to a different Codex thread. Re-register its offline pane with --replace first.');
+      }
+      session.adapter = 'codex'; session.codex = { ...binding, managed: options.managed ?? session.codex?.managed ?? false };
+      session.status = session.deliveryPaused ? 'busy' : 'ready'; session.updatedAt = now();
+      state.observations ||= {};
+      state.observations[session.id] = applyCodexEvent(state.observations[session.id], binding.threadId,
+        { method: 'thread/started', params: { thread } });
+      await this.store.save(state);
+      return session;
+    });
+  }
+
+  async flush(ref) {
+    return this.store.locked(async state => {
+      const session = this.current(state, ref);
+      while (state.messages.some(m => m.to === session.id && m.status === 'queued')) {
+        const before = state.messages.filter(m => m.to === session.id && m.status === 'queued').length;
+        await this.deliverOne(state, session);
+        if (state.messages.filter(m => m.to === session.id && m.status === 'queued').length === before) break;
+      }
+      return session;
+    });
   }
 }
