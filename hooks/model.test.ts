@@ -225,6 +225,18 @@ describe('shortModel', () => {
 })
 
 describe('review fixes', () => {
+  test('turn usage supplies the main model and updates the observed agent model', async () => {
+    const usage = { model: 'claude-haiku-5-5', input_tokens: 100, output_tokens: 10,
+      cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    let s = spawn(freshState(0, 'cards'), 'a1')
+    s = apply(s, { kind: 'turn-end', reason: 'answer', at: 100, usage })
+    expect(s.nodes[MAIN]!.model).toBe('claude-haiku-5-5')
+    s = apply(s, { kind: 'turn-end', agentId: 'a1', reason: 'answer', at: 100, usage })
+    expect(s.nodes.a1!.model).toBe('claude-haiku-5-5')
+    s = apply(s, { kind: 'turn-end', agentId: 'a1', reason: 'answer', at: 200 })
+    expect(s.nodes.a1!.model).toBe('claude-haiku-5-5')
+  })
+
   test('a spawn that lands after the first turn started keeps running and the current tool', async () => {
     let s = freshState(0, 'tree')
     s = apply(s, { kind: 'turn-start', agentId: 'a1', at: 100 })

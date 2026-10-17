@@ -6,6 +6,7 @@ const LAST_TEXT = 60
 const ENDED: ReadonlySet<AgentStatus> = new Set(['completed', 'failed', 'killed'])
 
 export type Usage = {
+  model?: string
   input_tokens: number
   output_tokens: number
   cache_read_input_tokens: number
@@ -151,6 +152,7 @@ export const apply = (s: DagState, ev: DagEvent): DagState => {
       const id = loopId(ev.agentId)
       return patch(ensure(s, id, ev.at), id, n => ({
         ...n,
+        model: ev.usage?.model ?? n.model,
         status: endStatus(n, ev.reason),
         endedAt: ev.at,
         currentTool: undefined,

@@ -1,6 +1,7 @@
 import { test, expect, describe } from 'claude-code/testing'
 import { MAIN, apply, freshState } from './model'
-import { treeRows, cards, messageRows, summary, plainText, visibleColumns } from './draw'
+import { treeRows, cards, cardRows, messageRows, summary, plainText, visibleColumns } from './draw'
+import { textWidth } from './format'
 import type { DagState } from '../types'
 
 const sample = (): DagState => {
@@ -111,22 +112,96 @@ describe('treeRows', () => {
 })
 
 describe('cards', () => {
-  test('one card per node with three inner rows and tool chips', async () => {
+  test('one card per node with full usage, activity and recent messages', async () => {
     const cs = cards(sample(), o(80))
     expect(cs).toHaveLength(5)
     expect(cs[2]!.depth).toBe(1)
     expect(cs[2]!.status).toBe('running')
     const inner = cs[2]!.rows.map(r => r.map(s => s.text).join(''))
     expect(inner[0]).toMatch(/^◐ fork: review diff/)
-    expect(inner[1]).toMatch(/running 31s · fable · 0 · 1 turn/)
-    expect(inner[2]).toMatch(/▸ Bash/)
+    expect(inner[1]).toMatch(/running · fable · 31s · 1 turn/)
+    expect(inner[2]).toMatch(/tokens 0 · in 0 · out 0 · 0 tools/)
+    expect(inner[3]).toMatch(/now ▸ Bash/)
+    expect(inner[4]).toMatch(/msg 1 sent \/ 1 received/)
+    expect(inner[5]).toMatch(/← main: "stop after this file"/)
     expect(cs[3]!.depth).toBe(2)
-    for (const c of cs) for (const r of c.rows) expect([...r.map(s => s.text).join('')].length).toBeLessThanOrEqual(80 - 4 - 2 * c.depth)
+    for (const c of cs) for (const r of c.rows) expect(textWidth(r.map(s => s.text).join(''))).toBeLessThanOrEqual(c.width - 4)
   })
 
-  test('tool chips row is omitted when showTools is false', async () => {
+  test('tool visibility preserves usage and messages; message toggle removes inline messages', async () => {
     const s = apply(sample(), { kind: 'set-flags', showTools: false })
-    expect(cards(s, o(80))[2]!.rows).toHaveLength(2)
+    const detail = plainText(cards(s, o(80))[2]!.rows)
+    expect(detail).not.toMatch(/now ▸ Bash/)
+    expect(detail).toMatch(/tokens 0/)
+    expect(detail).toMatch(/stop after this file/)
+    const hidden = apply(s, { kind: 'set-flags', showMessages: false })
+    expect(plainText(cards(hidden, o(80))[2]!.rows)).not.toMatch(/msg |stop after this file/)
+  })
+
+  test('branches and continuation rails connect nested cards and siblings', async () => {
+    const rows = text(cardRows(sample(), o(80)))
+    expect(rows.some(r => /^╭─ ◐ main /.test(r))).toBe(true)
+    expect(rows.some(r => /^├─╭─ ✓ Explore: find callers /.test(r))).toBe(true)
+    expect(rows.some(r => /^├─╭─ ◐ fork: review diff /.test(r))).toBe(true)
+    expect(rows.some(r => /^│ │ running/.test(r))).toBe(true)
+    expect(rows.some(r => /^│ └─╭─ ◌ Plan: outline fix /.test(r))).toBe(true)
+    expect(rows.some(r => /^└─╭─ ✗ run tests /.test(r))).toBe(true)
+    for (const row of rows) expect(textWidth(row)).toBe(80)
+  })
+
+  test('narrow cards wrap metadata without dropping usage or current tool', async () => {
+    let s = sample()
+    for (const tool of ['ReadLongFileName', 'SearchLongPattern', 'InspectDependencyGraph', 'ReadMoreFiles']) {
+      s = apply(s, { kind: 'tool-end', agentId: 'a2', tool })
+    }
+    s = apply(s, { kind: 'tool-start', agentId: 'a2', tool: 'Bash' })
+    const rows = cardRows(s, o(36))
+    const all = plainText(rows)
+    expect(all).toMatch(/tokens 4.1k/)
+    expect(all).toMatch(/in 4.0k/)
+    expect(all).toMatch(/out 100/)
+    expect(all).toMatch(/4 tools/)
+    expect(all).toMatch(/now ▸ Bash/)
+    expect(rows.flat().find(seg => seg.text === 'now ▸ Bash')?.color).toBe('claude')
+    for (const row of text(rows)) expect(textWidth(row)).toBe(36)
+  })
+
+  test('long task names wrap and Chinese/emoji labels stay inside deep card borders', async () => {
+    let s = freshState(0, 'cards')
+    let parent = MAIN
+    for (let i = 0; i < 16; i++) {
+      const id = `deep-${i}`
+      s = apply(s, { kind: 'spawn', agentId: id, parentId: parent, label: '审查代码 👩‍💻 检查测试和依赖关系', type: 'Explore', isTeammate: false, at: i })
+      parent = id
+    }
+    for (const width of [36, 44, 60, 80, 120]) {
+      for (const row of text(cardRows(s, o(width)))) expect(textWidth(row)).toBe(width)
+    }
+    expect(plainText(cardRows(s, o(36)))).toMatch(/… /)
+    expect(plainText(cards(s, o(80))[1]!.rows)).toMatch(/审查代码 👩‍💻 检查测试和依赖关系/)
+    s.nodes['deep-0']!.label = 'review the current diff and check the new session registry'
+    const label = text(cards(s, o(44))[1]!.rows).slice(0, 3).join(' ').replace(/\s+/g, ' ')
+    expect(label).toMatch(/review the current diff and check the new session registry/)
+  })
+
+  test('ASCII mode applies to card borders, branches, tools and messages', async () => {
+    const rows = text(cardRows(sample(), o(80, 'ascii')))
+    expect(rows.some(r => /^\|-\+- > fork: review diff/.test(r))).toBe(true)
+    expect(rows.some(r => /^\| `-\+- \. Plan: outline fix/.test(r))).toBe(true)
+    expect(rows.every(r => [...r].every(c => c.charCodeAt(0) < 128))).toBe(true)
+  })
+
+  test('workflow cards preserve group membership and show aggregate status', async () => {
+    let s = freshState(0, 'cards')
+    for (const id of ['w1', 'w2']) s = apply(s, { kind: 'spawn', agentId: id, parentId: MAIN,
+      label: id, type: 'general-purpose', isTeammate: false, workflowRunId: 'wf_review', at: 1 })
+    s = apply(s, { kind: 'turn-start', agentId: 'w1', at: 2 })
+    const cs = cards(s, o(80))
+    expect(cs.map(c => c.id)).toEqual([MAIN, 'wf:wf_review', 'w1', 'w2'])
+    expect(cs[1]!.status).toBe('running')
+    expect(plainText(cs[1]!.rows)).toMatch(/2 agents · 1 running · 0 failed · tokens 0/)
+    expect(cs[2]!.prefix).toBe('  ├─')
+    expect(cs[3]!.prefix).toBe('  └─')
   })
 })
 

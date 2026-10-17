@@ -4,24 +4,24 @@ import type { Register } from 'claude-code'
 import type { DagState, GlyphSet, View } from '../types'
 import { MAIN, apply, freshState, isActive, loopId } from './model'
 import type { DagEvent, ListedAgent } from './model'
-import { cards, messageRows, plainText, summary, treeRows } from './draw'
+import { cardRows, messageRows, plainText, summary, treeRows } from './draw'
 import type { Row, Segment } from './draw'
-import { STATUS_COLOR } from './format'
 
 export const PANE = 'agent-dag'
 const TITLE = 'Agents'
 const TICK_MS = 1000
 const RECONCILE_EVERY = 5
-const CARDS_MIN_COLUMNS = 44
+const DETAILS_MIN_COLUMNS = 36
 
-export const dag = atom({ plugin: 'agent-dag', key: 'dag' } as const, freshState(0, 'tree'), { shape: 'v1' })
+export const dag = atom({ plugin: 'agent-dag', key: 'dag' } as const, freshState(0, 'cards'), { shape: 'v1' })
 
 type Options = { glyphs: GlyphSet; autoOpen: boolean; defaultView: View }
 
 const readOptions = (raw: Readonly<Record<string, unknown>>): Options => ({
   glyphs: raw.glyphs === 'ascii' ? 'ascii' : 'unicode',
   autoOpen: raw.autoOpen !== false,
-  defaultView: raw.defaultView === 'cards' ? 'cards' : 'tree',
+  // Preserve saved tree/cards preferences while exposing density in the UI.
+  defaultView: raw.defaultView === 'tree' || raw.defaultView === 'compact' ? 'tree' : 'cards',
 })
 
 type Dollar = Parameters<typeof update>[0] & { ui: { open: (pane: { id: string; title?: string }) => Promise<unknown> } }
@@ -126,7 +126,7 @@ export const register: Register = (on, rawOptions) => {
       const s = await read($, dag)
       const o = { columns: 80, glyphs: options.glyphs, now }
       const msgs = messageRows(s, o)
-      const rows = [...treeRows(s, o), ...(msgs.length ? [[{ text: '' }], ...msgs] : [])]
+      const rows = [...(s.view === 'cards' ? cardRows(s, o) : treeRows(s, o)), ...(msgs.length ? [[{ text: '' }], ...msgs] : [])]
       return { text: '```\n' + plainText(rows) + '\n```' }
     }
     if (arg === 'reset') {
@@ -163,24 +163,19 @@ export const register: Register = (on, rawOptions) => {
       const hasAgents = s.order.length > 1
       const body = !hasAgents
         ? [<Text key="empty" dimColor>No agents yet. The pane fills when the session spawns one.</Text>]
-        : s.view === 'cards' && columns >= CARDS_MIN_COLUMNS
-          ? cards(s, o).map((c, i) => (
-              <Box key={`c${i}`} marginLeft={2 * c.depth} borderStyle="round" borderColor={STATUS_COLOR[c.status].color}
-                borderDimColor={STATUS_COLOR[c.status].dim} flexDirection="column" paddingX={1}>
-                {c.rows.map(line)}
-              </Box>
-            ))
+        : s.view === 'cards' && columns >= DETAILS_MIN_COLUMNS
+          ? cardRows(s, o).map(line)
           : treeRows(s, o).map(line)
       const msgs = hasAgents ? messageRows(s, o) : []
-      const canCards = columns >= CARDS_MIN_COLUMNS
+      const canDetails = columns >= DETAILS_MIN_COLUMNS
       return (
         <Box flexDirection="column">
           <Box flexDirection="column">{body}</Box>
           {msgs.length > 0 && <Box flexDirection="column" marginTop={1}>{msgs.map(line)}</Box>}
           <Box marginTop={1} justifyContent="space-between">
             <Box gap={1}>
-              {canCards && (
-                <Button key="view" hotkey="v" plain label={s.view === 'cards' ? 'tree' : 'cards'}
+              {canDetails && (
+                <Button key="view" hotkey="v" plain label={s.view === 'cards' ? 'compact' : 'detailed'}
                   onPress={() => update($, dag, st => apply(st, { kind: 'set-flags', view: st.view === 'cards' ? 'tree' : 'cards' }))} />
               )}
               <Button key="messages" hotkey="m" plain label="messages"

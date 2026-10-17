@@ -82,7 +82,10 @@ export async function main(args) {
   if (!command || command === '--help' || command === 'help' || command === '-h') {
     console.log(HELP); return;
   }
-  if (command === '--version') { console.log('0.2.0'); return; }
+  if (command === '--version') {
+    console.log(JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version);
+    return;
+  }
   if (!Object.hasOwn(OPTIONS, command)) throw new Error(`Unknown command: ${command}. Run dag --help.`);
   const separator = rest.indexOf('--');
   const launch = command === 'create' && separator >= 0 ? rest.slice(separator + 1) : [];

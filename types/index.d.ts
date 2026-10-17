@@ -2,6 +2,7 @@ export type AgentStatus =
   | 'pending' | 'running' | 'waiting' | 'idle'
   | 'completed' | 'failed' | 'killed'
 
+// Persisted names retained for hot reloads: tree = compact, cards = detailed.
 export type View = 'tree' | 'cards'
 export type GlyphSet = 'unicode' | 'ascii'
 

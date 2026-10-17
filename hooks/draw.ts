@@ -1,11 +1,14 @@
 import type { AgentNode, AgentStatus, DagState, GlyphSet } from '../types'
 import { MAIN, children, shortModel } from './model'
-import { GLYPHS, STATUS_COLOR, STATUS_WORD, fit, fmtElapsed, fmtTokens, padLeft } from './format'
+import { GLYPHS, STATUS_COLOR, STATUS_WORD, fit, fmtElapsed, fmtTokens, padLeft, textWidth, wrapText } from './format'
 
 export type Segment = { text: string; color?: string; dim?: boolean; bold?: boolean }
 export type Row = Segment[]
 export type LayoutOptions = { columns: number; glyphs: GlyphSet; now: number }
-export type Card = { depth: number; status: AgentStatus; rows: Row[] }
+export type Card = {
+  id: string; depth: number; status: AgentStatus; rows: Row[]
+  prefix: string; continuation: string; width: number
+}
 
 const MIN_LABEL = 12
 const MAX_MESSAGES = 12
@@ -142,31 +145,98 @@ export const cards = (s: DagState, o: LayoutOptions): Card[] => {
   const dot = o.glyphs === 'ascii' ? ' - ' : ' · '
   const ell = ellipsisOf(o.glyphs)
   const root = rootItem(s)
+  // Keep room for detail fields even when the graph is very deeply nested.
+  const gutterLimit = Math.max(0, Math.floor((o.columns - 26) / 2) * 2)
+  const gutter = (prefix: string) => textWidth(prefix) <= gutterLimit ? prefix
+    : gutterLimit >= 4 ? ell + ' ' + prefix.slice(-(gutterLimit - 2)) : ''
   return flatten([root]).map(it => {
-    const inner = o.columns - 4 - 2 * it.depth
+    const prefix = gutter(connector(it, g))
+    const continuation = gutter(it.depth === 0 ? ''
+      : it.trail.slice(1).map(more => more ? g.pipe : g.blank).join('') + (it.isLast ? g.blank : g.pipe))
+    const width = o.columns - textWidth(prefix)
+    const inner = width - 4
     const n = it.node
-    const rows: Row[] = [[statusSeg(it.status, g.status[it.status]), { text: ' ' + fit(it.label, inner - 2, ell).trimEnd(), bold: true }]]
-    if (n) {
-      const meta = [
-        `${STATUS_WORD[n.status]} ${fmtElapsed(elapsedOf(n, o.now))}`,
-        shortModel(n.model) || '?',
-        fmtTokens(n.inputTokens + n.outputTokens),
-        `${n.turns} turn${n.turns === 1 ? '' : 's'}`,
-      ].join(dot)
-      rows.push([{ text: fit(meta, inner, ell).trimEnd(), dim: true }])
-      if (s.showTools) {
-        const chips: Row = []
-        if (n.recentTools.length) chips.push({ text: n.recentTools.join(' '), dim: true })
-        if (n.currentTool) chips.push({ text: `${chips.length ? ' ' : ''}${g.chip} ${n.currentTool}`, color: 'claude' })
-        if (!chips.length) chips.push({ text: 'no tools yet', dim: true })
-        const total = chips.map(c => c.text).join('')
-        if ([...total].length > inner) {
-          rows.push([{ text: fit(total, inner, ell), dim: true }])
-        } else rows.push(chips)
+    const title = wrapText(it.label, inner - 3, 3, ell)
+    const rows: Row[] = [[statusSeg(it.status, g.status[it.status]), { text: ' ' + (title[0] ?? ''), bold: true }]]
+    for (const line of title.slice(1)) rows.push([{ text: '  ' + line, bold: true }])
+    // Pack whole fields onto successive lines instead of truncating the entire
+    // metadata row, which used to hide token, turn and tool counts.
+    const fields = (parts: string[]) => {
+      let line = ''
+      for (const part of parts) {
+        const next = line ? line + dot + part : part
+        if (line && textWidth(next) > inner) {
+          rows.push([{ text: line, dim: true }])
+          line = part
+        } else line = next
       }
+      if (line) rows.push(...wrapText(line, inner, 2, ell).map(text => [{ text, dim: true }]))
     }
-    return { depth: it.depth, status: it.status, rows }
+    if (n) {
+      fields([
+        STATUS_WORD[n.status],
+        shortModel(n.model) || '?',
+        fmtElapsed(elapsedOf(n, o.now)),
+        `${n.turns} turn${n.turns === 1 ? '' : 's'}`,
+      ])
+      fields([
+        `tokens ${fmtTokens(n.inputTokens + n.outputTokens)}`,
+        `in ${fmtTokens(n.inputTokens)}`, `out ${fmtTokens(n.outputTokens)}`,
+        `${n.toolCount} tool${n.toolCount === 1 ? '' : 's'}`,
+      ])
+      if (s.showTools) {
+        // The current tool has its own row and cannot be pushed off by history.
+        if (n.currentTool) rows.push(...wrapText(`now ${g.chip} ${n.currentTool}`, inner, 2, ell)
+          .map(text => [{ text, color: 'claude' }]))
+        if (n.recentTools.length) rows.push(...wrapText(`recent ${n.recentTools.join(` ${g.arrow} `)}`, inner, 2, ell)
+          .map(text => [{ text, dim: true }]))
+      }
+      if (s.showMessages) {
+        const messages = s.messages.filter(m => m.from === n.id || m.to === n.id)
+        if (messages.length) {
+          const latest = messages.reduce((a, b) => a.lastAt >= b.lastAt ? a : b)
+          const sent = messages.filter(m => m.from === n.id).reduce((sum, m) => sum + m.count, 0)
+          const received = messages.filter(m => m.to === n.id).reduce((sum, m) => sum + m.count, 0)
+          const outgoing = latest.from === n.id
+          const peer = outgoing ? latest.to : latest.from
+          fields([`msg ${sent} sent / ${received} received`])
+          const direction = outgoing ? g.arrow : o.glyphs === 'ascii' ? '<-' : '←'
+          const quote = `${direction} ${s.nodes[peer]?.label ?? peer}: "${latest.lastText}"`
+          rows.push(...wrapText(quote, inner, 2, ell).map(text => [{ text, dim: true }]))
+        }
+      }
+    } else if (it.members) {
+      fields([
+        `${it.members.length} agents`,
+        `${it.members.filter(m => m.status === 'running').length} running`,
+        `${it.members.filter(m => m.status === 'failed').length} failed`,
+        `tokens ${fmtTokens(it.members.reduce((sum, m) => sum + m.inputTokens + m.outputTokens, 0))}`,
+      ])
+    }
+    return { id: it.id, depth: it.depth, status: it.status, rows, prefix, continuation, width }
   })
+}
+
+/** Bordered detail cards connected by the same branches as the compact tree. */
+export const cardRows = (s: DagState, o: LayoutOptions): Row[] => {
+  const ascii = o.glyphs === 'ascii'
+  const b = ascii ? { tl: '+', tr: '+', bl: '+', br: '+', h: '-', v: '|' }
+    : { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' }
+  const out: Row[] = []
+  for (const card of cards(s, o)) {
+    const border = (text: string): Segment => statusSeg(card.status, text)
+    const title = card.rows[0]!
+    const titleWidth = textWidth(title.map(seg => seg.text).join(''))
+    out.push([{ text: card.prefix, dim: true }, border(b.tl + b.h + ' '), ...title,
+      border(' ' + b.h.repeat(Math.max(0, card.width - titleWidth - 5)) + b.tr)])
+    for (const row of card.rows.slice(1)) {
+      const size = textWidth(row.map(seg => seg.text).join(''))
+      out.push([{ text: card.continuation, dim: true }, border(b.v + ' '), ...row,
+        { text: ' '.repeat(Math.max(0, card.width - 4 - size)) }, border(' ' + b.v)])
+    }
+    out.push([{ text: card.continuation, dim: true }, border(b.bl + b.h.repeat(Math.max(0, card.width - 2)) + b.br)])
+  }
+  return out
 }
 
 export const messageRows = (s: DagState, o: LayoutOptions): Row[] => {

@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'claude-code/testing'
-import { GLYPHS, STATUS_WORD, STATUS_COLOR, fmtElapsed, fmtTokens, fit, padLeft } from './format'
+import { GLYPHS, STATUS_WORD, STATUS_COLOR, fmtElapsed, fmtTokens, fit, padLeft, textWidth, wrapText } from './format'
 
 describe('glyphs', () => {
   test('ascii set has no character above U+007F', async () => {
@@ -52,5 +52,20 @@ describe('formatting', () => {
   test('padLeft', async () => {
     expect(padLeft('7', 3)).toBe('  7')
     expect(padLeft('1234', 3)).toBe('1234')
+  })
+  test('terminal widths preserve Chinese, accents and joined emoji', async () => {
+    expect(textWidth('审查代码')).toBe(8)
+    expect(textWidth('e\u0301')).toBe(1)
+    expect(textWidth('👩‍💻')).toBe(2)
+    expect(textWidth('🇨🇳')).toBe(2)
+    expect(fit('审查代码', 6)).toBe('审查… ')
+    expect(textWidth(fit('审查代码', 6))).toBe(6)
+    expect(fit('👩‍💻 work', 3)).toBe('👩‍💻…')
+    expect(padLeft('中文', 6)).toBe('  中文')
+  })
+  test('wrap retains whole fields and truncates only the final line', async () => {
+    expect(wrapText('review the current diff', 12, 3)).toEqual(['review the', 'current diff'])
+    expect(wrapText('review the current diff', 12, 1)).toEqual(['review the …'])
+    for (const line of wrapText('审查代码并检查测试 👩‍💻', 8, 4)) expect(textWidth(line)).toBeLessThanOrEqual(8)
   })
 })

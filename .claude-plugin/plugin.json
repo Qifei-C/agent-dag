@@ -1,6 +1,6 @@
 {
   "name": "agent-dag",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Agent session coordination in tmux: a dag CLI for session creation and recorded messaging, plus a live Claude Code agent tree",
   "author": { "name": "SOMA Robotics IT" },
   "license": "MIT",
@@ -21,10 +21,10 @@
     },
     "defaultView": {
       "type": "string",
-      "title": "Default view",
-      "description": "The view the pane starts in",
-      "options": ["tree", "cards"],
-      "default": "tree"
+      "title": "Default density",
+      "description": "Detailed connects information cards with tree branches; compact shows one row per agent",
+      "options": ["detailed", "compact"],
+      "default": "detailed"
     }
   }
 }

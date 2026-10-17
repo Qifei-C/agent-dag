@@ -59,6 +59,8 @@ describe('agent-dag pane', () => {
       const ui = await $.ui.mount({ plugin: 'agent-dag', surface, component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
       expect(await ui.find({ type: 'Text', text: /Explore: find callers/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /pending/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /└─╭─ ◌ Explore: find callers/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /tokens 0 · in 0 · out 0/ })).toBeDefined()
       await ui.unmount()
     }
   })
@@ -102,23 +104,48 @@ describe('agent-dag pane', () => {
     await ui.unmount()
   })
 
-  test('footer buttons switch view and fold messages', async ($, on) => {
+  test('footer switches density and hides both inline messages and the message list', async ($, on) => {
     await boot($, on)
     await $.agent.spawn(spawnOf({ description: 'review diff', subagentType: 'fork', name: 'rev' }))
     await $.session.send(sendOf('rev', 'hi'))
     const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
     expect(await ui.find({ type: 'Button', key: 'view' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: 'compact' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /1 turn|0 turns/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /msg 1 sent/ })).toBeDefined()
     await ui.press({ key: 'view' })
-    expect(await ui.find({ type: 'Text', text: /1 turn|0 turns/ })).toBeDefined()   // a card's meta row
+    expect(await ui.find({ type: 'Button', text: 'detailed' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /1 turn|0 turns/ })).toBe(undefined)
+    await ui.press({ key: 'view' })
     await ui.press({ key: 'messages' })
     expect(await ui.find({ type: 'Text', text: /^messages/ })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /msg 1 sent/ })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /"hi"/ })).toBe(undefined)
     await ui.unmount()
   })
 
-  test('a narrow pane offers no cards button', async ($, on) => {
+  test('a narrow pane falls back to compact without changing the saved density', async ($, on) => {
     await boot($, on)
-    const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: { ...PANE_PROPS, bodyColumns: 40 } })
+    await $.agent.spawn(spawnOf({ description: 'review diff', subagentType: 'fork', name: 'rev' }))
+    const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: { ...PANE_PROPS, bodyColumns: 32 } })
     expect(await ui.find({ type: 'Button', key: 'view' })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /└─◌ fork:/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /0 turns/ })).toBe(undefined)
+    await ui.unmount()
+    const wide = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
+    expect(await wide.find({ type: 'Text', text: /0 turns/ })).toBeDefined()
+    await wide.unmount()
+  })
+
+  test('tool details toggle preserves tool counts', async ($, on) => {
+    await boot($, on)
+    await $.agent.spawn(spawnOf({ description: 'review diff', subagentType: 'fork', name: 'rev' }))
+    await $.tool.call({ tool: 'Read', file_path: '/tmp/x/a' })
+    const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /recent Read/ })).toBeDefined()
+    await ui.press({ key: 'tools' })
+    expect(await ui.find({ type: 'Text', text: /recent Read/ })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /1 tool/ })).toBeDefined()
     await ui.unmount()
   })
 
@@ -136,7 +163,7 @@ describe('agent-dag options', () => {
     await $.agent.spawn(spawnOf({ description: 'find callers', subagentType: 'Explore', name: 'a1' }))
     const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
     const rows = await rowsOf(ui)
-    expect(rows.some((r: string) => /^`-\. /.test(r))).toBe(true)
+    expect(rows.some((r: string) => /^`-\+- \. /.test(r))).toBe(true)
     expect(rows.every((r: string) => [...r].every(c => c.charCodeAt(0) < 0x80))).toBe(true)
     await ui.unmount()
   })
@@ -152,6 +179,16 @@ describe('agent-dag options', () => {
     await $.agent.spawn(spawnOf({ description: 'a', subagentType: 'Explore', name: 'a1' }))
     const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
     expect(await ui.find({ type: 'Text', text: /0 turns/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('compact density starts with a single row per agent', { options: { defaultView: 'compact' } }, async ($, on) => {
+    await boot($, on)
+    await $.agent.spawn(spawnOf({ description: 'a', subagentType: 'Explore', name: 'a1' }))
+    const ui = await $.ui.mount({ plugin: 'agent-dag', surface: 'terminal', component: 'Pane', requestId: 'agent-dag', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /└─◌ Explore: a/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /0 turns/ })).toBe(undefined)
+    expect(await ui.find({ type: 'Button', text: 'detailed' })).toBeDefined()
     await ui.unmount()
   })
 })

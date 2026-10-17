@@ -153,20 +153,37 @@ Run `dag --help` for command arguments. For an agent workflow, see the
 
 ## Claude Code plugin
 
-The plugin displays the session's agents as a live tree in a docked pane:
-who spawned whom, status, elapsed time, tokens, model, current tool, and messages
-between agents. The pane uses Claude Code's renderer in supported terminals,
-including tmux.
+The plugin connects agent detail cards with tree branches in a docked pane.
+Follow the parent/child rails to see who spawned whom, then read each card for
+status, model, elapsed time, turns, total and input/output tokens, tool counts,
+current tool, recent tools, and the latest message. Long task names and metadata
+wrap onto additional lines. The pane uses Claude Code's renderer in supported
+terminals, including tmux.
 
 ```
-◐ main                           running  1m02s   12.4k  fable   Agent
-├─✓ Explore: find callers        done       12s    4.1k  haiku
-├─◐ fork: review diff            running    31s    8.0k  fable   Bash
-│ └─◌ Plan: outline fix          pending     4s       0  sonnet
-└─✗ run tests                    failed     40s    2.2k  sonnet
-
-messages
-  review diff → main       1  "done, three callers found"
+╭─ ◐ main ─────────────────────────────────────────────────────────────╮
+│ running · ? · 32s · 1 turn                                           │
+│ tokens 0 · in 0 · out 0 · 0 tools                                    │
+│ msg 0 sent / 1 received                                              │
+│ ← review session coordination: "Found two delivery edge cases;       │
+│ checking recovery."                                                  │
+╰──────────────────────────────────────────────────────────────────────╯
+├─╭─ ◐ fork: review session coordination ──────────────────────────────╮
+│ │ running · sonnet · 31s · 1 turn                                    │
+│ │ tokens 8.0k · in 7.2k · out 800 · 3 tools                          │
+│ │ now ▸ Bash                                                         │
+│ │ recent Read → Grep → Read                                          │
+│ │ msg 1 sent / 0 received                                            │
+│ │ → main: "Found two delivery edge cases; checking recovery."        │
+│ ╰────────────────────────────────────────────────────────────────────╯
+│ └─╭─ ◌ Explore: 检查消息队列与重试逻辑 👩‍💻 ───────────────────────────╮
+│   │ pending · haiku · 31s · 0 turns                                  │
+│   │ tokens 0 · in 0 · out 0 · 0 tools                                │
+│   ╰──────────────────────────────────────────────────────────────────╯
+└─╭─ ✗ run integration tests ──────────────────────────────────────────╮
+  │ failed · sonnet · 12s · 0 turns                                    │
+  │ tokens 2.2k · in 2.0k · out 200 · 0 tools                          │
+  ╰────────────────────────────────────────────────────────────────────╯
 ```
 
 ### Use the pane
@@ -175,11 +192,16 @@ messages
   engine only seats an unasked pane on a wide terminal (144 columns, or 110
   once you have opened it by hand); narrower than that it waits until you
   run `/dag`, which seats it at any width.
-- `/dag` opens or closes the pane. `/dag inspect` prints the tree into the
+- `/dag` opens or closes the pane. `/dag inspect` prints the current layout into the
   transcript. `/dag reset` clears it.
 - With the pane focused (click it, or ctrl+x then tab): `v` switches between
-  the tree and the cards view, `m` folds the messages section, `t` hides the
-  tool chips on cards. Arrow keys scroll.
+  detailed cards and a compact tree with one row per agent. `m` toggles inline
+  messages and the messages section; `t` toggles current/recent tool details.
+  Arrow keys scroll.
+- Below 36 body columns, the pane automatically uses the compact layout. It
+  restores the selected density when widened. Deep branches shorten their
+  ancestor gutter to preserve room for card content. Chinese text and joined
+  emoji are measured in terminal cells so card borders stay aligned.
 
 ### Options (`/config`)
 
@@ -190,9 +212,12 @@ writes) plus output, since Claude Code agents run mostly on cached input.
 | --- | --- | --- |
 | Glyph set | `unicode`, `ascii` | `unicode` |
 | Open on first agent | on, off | on |
-| Default view | `tree`, `cards` | `tree` |
+| Default density | `detailed`, `compact` | `detailed` |
 
 Pick `ascii` if your font lacks `✓ ✗ ⊘ ◐`.
+ASCII mode also applies to card borders, branches, and message/tool arrows.
+Saved `tree` and `cards` preferences are still read as compact and detailed
+respectively; an existing session keeps its selected density across hot reloads.
 
 ### Install the plugin
 
