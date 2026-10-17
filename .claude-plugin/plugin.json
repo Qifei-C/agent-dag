@@ -1,7 +1,7 @@
 {
   "name": "agent-dag",
-  "version": "0.1.0",
-  "description": "Live tree of the session's agents, their status, cost, current tool and messages, in a docked pane",
+  "version": "0.2.0",
+  "description": "Live in-session agent tree, with an optional dag CLI for tmux session creation, registration and recorded messaging",
   "author": { "name": "SOMA Robotics IT" },
   "license": "MIT",
   "types": "./types/index.d.ts",

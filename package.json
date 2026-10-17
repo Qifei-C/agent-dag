@@ -1,0 +1,15 @@
+{
+  "name": "agent-dag",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Local tmux session registry and messaging companion for agent-dag",
+  "type": "module",
+  "bin": { "dag": "./bin/dag" },
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "install:cli": "node cli/install.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:plugin": "claude plugin test .",
+    "check": "node --check bin/dag && node --check cli/main.mjs && node --check cli/service.mjs && node --check cli/store.mjs && node --check cli/tmux.mjs && node --check cli/install.mjs"
+  }
+}
