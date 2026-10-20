@@ -6,6 +6,7 @@ import { Store } from './store.mjs';
 import { Tmux } from './tmux.mjs';
 import { CodexAdapter, validateBinding } from './codex.mjs';
 import { applyCodexEvent } from './codex-events.mjs';
+import { availabilityOf, isAvailable, setLimit, codexLimit, claudeLimit } from './availability.mjs';
 
 const BIN = fileURLToPath(new URL('../bin/', import.meta.url));
 const now = () => new Date().toISOString();
@@ -83,7 +84,7 @@ export class Service {
       const session = {
         id, name, role, cwd, parentId, socket: pane.socket_path,
         tmuxSession: pane.session_id, tmuxName: pane.session_name, pane: pane.pane_id,
-        command: launch, adapter, status: 'unknown', createdAt: now(), updatedAt: now(),
+        command: launch, adapter, status: 'unknown', availability: { state: 'available' }, createdAt: now(), updatedAt: now(),
       };
       // Keep a discoverable record if binding fails; never kill an agent that
       // may already have started useful work merely to roll back registration.
@@ -117,7 +118,7 @@ export class Service {
         id: randomUUID(), name, parentId: this.parent(state, parent),
         socket: pane.socket_path, pane: pane.pane_id, tmuxSession: pane.session_id,
         tmuxName: pane.session_name, cwd: pane.pane_current_path,
-        command: [], role: '', status: 'unknown', createdAt: now(),
+        command: [], role: '', status: 'unknown', availability: { state: 'available' }, createdAt: now(),
       };
       if (existing && (moved || pane['@dag_session_id'] !== existing.id)) {
         Object.assign(session, { socket: pane.socket_path, pane: pane.pane_id,
@@ -125,6 +126,7 @@ export class Service {
           cwd: pane.pane_current_path, status: 'unknown' });
         // A new terminal must not inherit the previous process's native thread.
         delete session.codex;
+        delete session.claude;
         if (state.observations) delete state.observations[session.id];
       }
       if (session.parentId === session.id) throw new Error('Session cannot be its own parent.');
@@ -161,7 +163,7 @@ export class Service {
     const state = await this.store.snapshot();
     return state.sessions.map(s => {
       const live = this.tmux.inspect(s);
-      return { ...s, online: live.online, status: live.online ? s.status : 'offline',
+      return { ...s, availability: availabilityOf(s), online: live.online, status: live.online ? s.status : 'offline',
         activity: state.observations?.[s.id]?.nodes?.[s.codex?.threadId]?.status,
         model: state.observations?.[s.id]?.nodes?.[s.codex?.threadId]?.model,
         error: live.error,
@@ -180,7 +182,7 @@ export class Service {
         const previous = state.messages.find(m => m.from === (sender?.id || 'person') && m.to === receiver.id && m.key === key);
         if (previous) {
           if (previous.text !== text || previous.replyTo !== replyTo) throw new Error('--key was already used for a different message.');
-          return previous;
+          return { ...previous, receiverAvailability: availabilityOf(receiver) };
         }
       }
       if (replyTo && !state.messages.some(m => m.id === replyTo && m.to === sender?.id)) {
@@ -194,11 +196,12 @@ export class Service {
       state.messages.push(message);
       await this.store.save(state);
       await this.deliverOne(state, receiver);
-      return message;
+      return { ...message, receiverAvailability: availabilityOf(receiver) };
     });
   }
 
   async deliverOne(state, session) {
+    if (!isAvailable(session)) return;
     const native = session.adapter === 'codex';
     if (native ? !session.codex || session.deliveryPaused : session.status !== 'ready') return;
     if (state.messages.some(m => m.to === session.id && ['sending', 'uncertain'].includes(m.status))) return;
@@ -210,6 +213,7 @@ export class Service {
     session.updatedAt = now();
     message.status = 'sending';
     message.attemptedAt = now();
+    delete message.error;
     await this.store.save(state);
     const envelope = `[dag id=${message.id} from=${message.fromName}${message.replyTo ? ` reply-to=${message.replyTo}` : ''}] ${JSON.stringify(message.text)} | acknowledge: dag ack ${message.id}`;
     try {
@@ -227,7 +231,11 @@ export class Service {
         message.transport = 'tmux';
       }
     } catch (error) {
-      message.status = 'uncertain';
+      const limit = native && codexLimit(error.data);
+      if (limit) setLimit(session, limit, 'codex');
+      // A failed read before queue invocation proves that no message was sent.
+      // Errors from the queue process itself remain uncertain.
+      message.status = limit && error.deliveryState === 'notSent' ? 'queued' : 'uncertain';
       message.error = error.message;
     }
     await this.store.save(state);
@@ -252,6 +260,61 @@ export class Service {
           if (session.adapter !== 'codex' || after === before || after === 0) break;
         }
       }
+      return session;
+    });
+  }
+
+  async pause(ref, { reason = 'Paused by operator.', until } = {}) {
+    if (!reason.trim() || reason.length > 4096) throw new Error('--reason must be 1–4096 characters.');
+    let retryAt;
+    if (until !== undefined) {
+      const date = new Date(until);
+      if (!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(until) || !Number.isFinite(date.getTime()) || date.getTime() <= Date.now()) {
+        throw new Error('--until must be a future ISO timestamp with a timezone, e.g. 2026-10-20T01:00:00-04:00.');
+      }
+      retryAt = date.toISOString();
+    }
+    return this.store.locked(async state => {
+      const session = this.current(state, ref);
+      session.availability = { state: retryAt ? 'cooldown' : 'blocked', reason, source: 'manual', since: now(),
+        ...(retryAt ? { retryAt } : {}) };
+      session.updatedAt = now();
+      await this.store.save(state);
+      return session;
+    });
+  }
+
+  async resume(ref) {
+    return this.store.locked(async state => {
+      const session = this.current(state, ref);
+      if (state.messages.some(m => m.to === session.id && ['sending', 'uncertain'].includes(m.status))) {
+        throw new Error('An earlier delivery is unconfirmed. Inspect dag inbox and acknowledge it before resuming.');
+      }
+      session.availability = { state: 'available', source: 'manual', since: now() };
+      session.updatedAt = now();
+      await this.store.save(state);
+      await this.drain(state, session);
+      return session;
+    });
+  }
+
+  // Command hooks and SDK bridges report only structured, session-scoped events.
+  async observeClaude(event) {
+    if (!event.session_id || event.agent_id || event.parent_tool_use_id) return;
+    const limit = claudeLimit(event);
+    if (!limit && event.hook_event_name !== 'SessionStart') return;
+    return this.store.locked(async state => {
+      const session = this.current(state, undefined, true);
+      if (!session || session.adapter === 'codex' || !this.tmux.inspect(session).online) return;
+      if (event.hook_event_name === 'SessionStart') {
+        session.claude = { sessionId: event.session_id };
+        session.updatedAt = now();
+      } else {
+        if (session.claude?.sessionId && session.claude.sessionId !== event.session_id) return;
+        session.claude ||= { sessionId: event.session_id };
+        setLimit(session, limit, 'claude');
+      }
+      await this.store.save(state);
       return session;
     });
   }
@@ -310,12 +373,16 @@ export class Service {
   async flush(ref) {
     return this.store.locked(async state => {
       const session = this.current(state, ref);
-      while (state.messages.some(m => m.to === session.id && m.status === 'queued')) {
-        const before = state.messages.filter(m => m.to === session.id && m.status === 'queued').length;
-        await this.deliverOne(state, session);
-        if (state.messages.filter(m => m.to === session.id && m.status === 'queued').length === before) break;
-      }
+      await this.drain(state, session);
       return session;
     });
+  }
+
+  async drain(state, session) {
+    while (state.messages.some(m => m.to === session.id && m.status === 'queued')) {
+      const before = state.messages.filter(m => m.to === session.id && m.status === 'queued').length;
+      await this.deliverOne(state, session);
+      if (state.messages.filter(m => m.to === session.id && m.status === 'queued').length === before) break;
+    }
   }
 }

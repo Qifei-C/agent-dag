@@ -50,7 +50,8 @@ export class CodexRpc extends EventEmitter {
       if (!entry) return;
       this.pending.delete(message.id);
       clearTimeout(entry.timer);
-      if (message.error) entry.reject(new Error(`Codex ${message.error.code}: ${message.error.message}`));
+      if (message.error) entry.reject(Object.assign(new Error(`Codex ${message.error.code}: ${message.error.message}`),
+        { code: message.error.code, data: message.error.data }));
       else entry.resolve(message.result);
     } else if (message.id !== undefined) {
       // Observers never decide approvals or answer user questions on the

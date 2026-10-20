@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { CodexRpc } from './codex-rpc.mjs';
 import { applyCodexEvent, CODEX_EVENTS } from './codex-events.mjs';
+import { codexEventLimit, setLimit } from './availability.mjs';
 
 const exec = promisify(execFile);
 export const defaultCodexSocket = () => process.env.DAG_CODEX_SOCKET
@@ -26,7 +27,8 @@ export class CodexAdapter {
   async submit(binding, text) {
     // Validate the exact binding before submitting; never resolve by title,
     // cwd, newest thread, or the sender's inherited CODEX_THREAD_ID.
-    await this.read(binding);
+    try { await this.read(binding); }
+    catch (error) { error.deliveryState = 'notSent'; throw error; }
     const env = { ...process.env };
     delete env.CODEX_THREAD_ID;
     if (binding.codexHome) env.CODEX_HOME = binding.codexHome;
@@ -47,7 +49,11 @@ export function observationSink(store, sessionId, rootId) {
         state.observations ||= {};
         const previous = state.observations[sessionId];
         const next = applyCodexEvent(previous, rootId, event);
-        if (next !== previous) { state.observations[sessionId] = next; await store.save(state); }
+        const limited = setLimit(session, codexEventLimit(event, rootId), 'codex');
+        if (next !== previous || limited) {
+          state.observations[sessionId] = next;
+          await store.save(state);
+        }
       }));
       // A failed write is reported to the owner, but must not leave future
       // observations chained forever onto a rejected promise.

@@ -190,6 +190,65 @@ read the durable inbox entry, then acknowledge it before declaring readiness
 again. If an acknowledged message still needs action, handle its content in the
 current turn. Offline receivers retain their queued messages.
 
+## Usage limits and paused delivery
+
+Session availability is independent of readiness and observed runtime activity:
+`available` permits normal delivery, `cooldown` records a temporary limit, and
+`blocked` requires operator intervention. A paused session keeps its identity,
+inbox, and already delivered messages. New messages stay `queued`. `dag send`
+returns the receiver's current `receiverAvailability`, including on an idempotent
+retry, and prints the reason when delivery is paused. `dag sessions` shows an
+`AVAILABILITY` column; the dashboard shows the reason and queued count.
+
+```sh
+dag pause reviewer --reason 'Usage limit reached'
+dag pause reviewer --reason 'Waiting for quota reset' --until 2026-10-20T01:00:00-04:00
+dag sessions --json
+dag inbox reviewer --json
+dag resume reviewer
+```
+
+Names can be omitted inside the registered session. `--until` requires a future
+ISO timestamp with a timezone and records an **expected** reset time; it does not
+schedule automatic recovery. `ready`, `bind`, idle telemetry, and an elapsed
+reset time cannot clear an availability hold. `resume` clears it explicitly and
+drains only queued messages, respecting existing readiness: a busy Codex session
+still needs `ready`; a tmux session permits one injection only when already ready.
+`sending` or `uncertain` messages must be inspected and acknowledged before
+resuming. Submitted, injected, acknowledged messages are never replayed.
+
+Managed Codex sessions detect structured root-thread `error` and failed
+`turn/completed` events. Recognized codes are `rateLimitExceeded` (cooldown),
+`usageLimitExceeded`, `sessionBudgetExceeded`, and `contextWindowExceeded`
+(blocked). Existing external Codex bindings are observed while the dashboard is
+open. A recognized rejection during the read before queue invocation leaves the
+message queued; a failure after invoking the queue remains uncertain. Unknown
+error text is never classified as a limit, and child-thread failures do not
+pause the registered root. An automatic observation cannot replace a manual hold.
+
+For Claude, load this plugin (installed normally, or with
+`claude --plugin-dir /path/to/agent-dag`). Its command hooks bind the native
+session on `SessionStart` and report structured `StopFailure.error` values:
+`rate_limit` becomes cooldown; billing, authentication, and account restrictions
+become blocked. See the [Claude hooks reference](https://code.claude.com/docs/en/hooks#stopfailure).
+Ordinary tmux sessions without these hooks use manual pause.
+SDK hosts can forward a single JSON `rate_limit_event` to
+`node /path/to/agent-dag/cli/claude-hook.mjs` on stdin, with the target's DAG/tmux
+environment. Only `rate_limit_info.status: "rejected"` pauses delivery;
+`resetsAt`, when present, is read as a Unix timestamp in seconds. Warnings do not
+pause delivery. The bridge checks session identity and ignores subagent events.
+Localized terminal prose such as “resets 1am” is not parsed as a timestamp.
+
+Claude Code 2.1.234+ can automatically continue an interrupted task after a
+subscription usage reset in an open interactive session. This is conditional on
+its settings and session state; a long computer sleep can require Enter, and a
+new prompt ends the current wait. See the [Claude interactive-mode
+reference](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset).
+DAG leaves this native continuation alone. Codex queue acceptance likewise is
+not a guarantee that a task has run or will automatically resume after a usage
+reset. In either client, keep accepted messages in their original state, inspect
+the inbox after recovery, and use `dag resume` to release new DAG messages.
+
 ## Session overview and storage
 
 `dag sessions` renders the parent/child session tree with delivery status,
@@ -248,6 +307,8 @@ Core CLI commands:
 | `dag ack ID` | Confirm receipt in the current session. |
 | `dag ready [NAME]` | Permit one queued or future terminal injection. |
 | `dag busy [NAME]` | Queue messages without injecting terminal input. |
+| `dag pause [NAME] [--reason TEXT] [--until ISO_TIME]` | Hold new delivery and record the reason or expected reset. |
+| `dag resume [NAME]` | Clear an availability hold while preserving readiness. |
 | `dag messages` | Show the complete message history. |
 | `dag sessions --watch` | Follow session status and queued counts. |
 | `dag view [--pane]` | Open the shared card/tree dashboard. |

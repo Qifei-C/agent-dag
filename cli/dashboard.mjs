@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Tmux } from './tmux.mjs';
 import { CodexRpc } from './codex-rpc.mjs';
 import { observationSink } from './codex.mjs';
+import { availabilityOf } from './availability.mjs';
 
 async function layout() {
   try { return await import('./layout.mjs'); }
@@ -23,10 +24,15 @@ export async function dashboardState(service) {
     const root = observation?.nodes?.[session.codex?.threadId];
     const isOnline = online.get(session.id);
     const stale = !!observation?.error;
+    const availability = availabilityOf(session);
+    const pending = snapshot.messages.filter(m => m.to === session.id && m.status === 'queued').length;
+    const hold = availability.state !== 'available';
     const node = {
       ...state.nodes.main, ...root, id: session.id,
       parentId: snapshot.sessions.some(s => s.id === session.parentId) ? session.parentId : 'main',
-      label: `${session.name}${session.role ? ` (${session.role})` : ''}${!isOnline ? ' [offline]' : stale ? ' [telemetry unavailable]' : ''}`,
+      label: `${session.name}${session.role ? ` (${session.role})` : ''}${hold ? ` [${availability.state}; queued ${pending}]` : ''}${!isOnline ? ' [offline]' : stale ? ' [telemetry unavailable]' : ''}`,
+      availability, pending,
+      deliveryNotice: hold ? `${availability.state}: ${availability.reason}${availability.retryAt ? `; expected reset ${availability.retryAt}` : ''}; dag resume ${session.name}` : undefined,
       type: 'session', status: !isOnline || stale ? 'waiting' : root?.status || 'idle',
       startedAt: Date.parse(session.createdAt), currentTool: !isOnline || stale ? undefined : root?.currentTool,
     };

@@ -6,7 +6,7 @@ const toolName = item => ({
 })[item.type];
 
 export const CODEX_EVENTS = new Set(['thread/started', 'thread/status/changed', 'turn/started', 'turn/completed',
-  'thread/tokenUsage/updated', 'item/started', 'item/completed', 'model/rerouted']);
+  'thread/tokenUsage/updated', 'item/started', 'item/completed', 'model/rerouted', 'error']);
 
 export const runtimeStatus = status => {
   if (status?.type === 'active') return status.activeFlags?.length ? 'waiting' : 'running';
@@ -41,6 +41,9 @@ export function applyCodexEvent(previous, rootId, event, at = Date.now()) {
     const n = out.nodes[p.threadId];
     if (!n) return previous;
     switch (event.method) {
+      case 'error':
+        n.status = p.willRetry ? 'waiting' : 'failed';
+        break;
       case 'thread/status/changed':
         if (!(n.id !== rootId && ['completed', 'failed', 'killed'].includes(n.status) && p.status?.type === 'idle')) {
           n.status = runtimeStatus(p.status);

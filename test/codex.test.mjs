@@ -126,6 +126,24 @@ test('managed Codex: automatic binding, native messages, telemetry, subagents, p
   assert.equal((await f.cli('sessions'))[0].status, 'offline');
 });
 
+test('managed Codex limits pause new submissions and resume does not replay accepted input', async t => {
+  const f = await fixture(t);
+  const session = await f.create();
+  const accepted = await f.cli('send', 'coder', 'accepted before limit');
+  const rpc = await new CodexRpc(session.codex.socketPath).connect();
+  try { await rpc.request('test/error', { threadId: session.codex.threadId, code: 'usageLimitExceeded' }); }
+  finally { rpc.close(); }
+  await eventually(async () => (await f.store.snapshot()).sessions[0].availability?.state === 'blocked');
+  const held = await f.cli('send', 'coder', 'queued during limit');
+  assert.equal(held.status, 'queued');
+  assert.equal(held.receiverAvailability.code, 'usageLimitExceeded');
+  await f.cli('ready', 'coder');
+  assert.equal((await entries(f.log)).filter(x => x.type === 'queue').length, 1);
+  await f.cli('resume', 'coder');
+  assert.equal((await entries(f.log)).filter(x => x.type === 'queue').length, 2);
+  assert.equal((await f.cli('messages')).find(m => m.id === accepted.id).status, 'submitted');
+});
+
 test('unregister removes Codex telemetry and late events cannot recreate it', async t => {
   const f = await fixture(t);
   const session = await f.create();
@@ -241,10 +259,14 @@ test('RPC observer never approves a server request and times out pending calls',
     const m = JSON.parse(data); received.push(m);
     if (m.method === 'initialize') ws.send(JSON.stringify({ id: m.id, result: {} }));
     if (m.method === 'initialized') ws.send(JSON.stringify({ id: 999, method: 'item/commandExecution/requestApproval', params: {} }));
+    if (m.method === 'rejected') ws.send(JSON.stringify({ id: m.id, error: {
+      code: -32000, message: 'quota', data: { codexErrorInfo: 'usageLimitExceeded' },
+    } }));
   }));
   await new Promise(resolve => http.listen(join(dir, 'rpc.sock'), resolve));
   const rpc = await new CodexRpc(join(dir, 'rpc.sock'), { timeout: 60 }).connect();
   t.after(async () => { rpc.close(); for (const ws of wss.clients) ws.terminate(); await new Promise(resolve => http.close(resolve)); await rm(dir, { recursive: true, force: true }); });
   await assert.rejects(rpc.request('unanswered'), /timed out/);
+  await assert.rejects(rpc.request('rejected'), error => error.code === -32000 && error.data.codexErrorInfo === 'usageLimitExceeded');
   assert.equal(received.some(m => m.id === 999), false);
 });

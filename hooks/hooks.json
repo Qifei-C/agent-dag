@@ -1,1 +1,12 @@
-{ "modules": ["./register.tsx"] }
+{
+  "modules": ["./register.tsx"],
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/cli/claude-hook.mjs\"", "timeout": 20 }]
+    }],
+    "StopFailure": [{
+      "matcher": "rate_limit|billing_error|authentication_failed|account_on_hold|oauth_org_not_allowed",
+      "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/cli/claude-hook.mjs\"", "timeout": 20 }]
+    }]
+  }
+}

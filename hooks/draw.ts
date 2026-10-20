@@ -179,6 +179,8 @@ export const cards = (s: DagState, o: LayoutOptions): Card[] => {
         fmtElapsed(elapsedOf(n, o.now)),
         `${n.turns} turn${n.turns === 1 ? '' : 's'}`,
       ])
+      if (n.deliveryNotice) rows.push(...wrapText(n.deliveryNotice, inner, 4, ell)
+        .map(text => [{ text, color: 'warning' }]))
       fields([
         `tokens ${fmtTokens(n.inputTokens + n.outputTokens)}`,
         `in ${fmtTokens(n.inputTokens)}`, `out ${fmtTokens(n.outputTokens)}`,

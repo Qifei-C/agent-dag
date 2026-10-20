@@ -37,6 +37,8 @@ if (args[0] === 'app-server') {
         ws.send(JSON.stringify({ id: m.id, error: { code: -32600, message: 'no rollout found' } })); return;
       }
       result = { thread: threads.get(p.threadId) };
+    } else if (m.method === 'test/error') {
+      notify('error', { threadId: p.threadId, error: { codexErrorInfo: p.code, message: 'usage limit reached' }, willRetry: false });
     } else if (m.method === 'test/queue') {
       const turnId = `turn-${++count}`;
       log({ type: 'queue', thread: p.threadId, text: p.text });

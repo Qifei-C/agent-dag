@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, readFile, rm, mkdir, writeFile, stat, readlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -236,6 +236,64 @@ test('unregister --offline removes closed, dead and rebound panes while leaving 
   const text = (await exec(process.execPath, [bin, 'unregister', 'live'], { env: f.env })).stdout;
   assert.match(text, /Unregistered live/);
   assert.deepEqual(await f.cli('sessions'), []);
+});
+
+test('pause/resume CLI and Claude command hooks hold new input without replaying old input', async t => {
+  const f = await fixture(t);
+  const { session, log } = await f.create('worker');
+  const hook = fileURLToPath(new URL('../cli/claude-hook.mjs', import.meta.url));
+  const report = event => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [hook], { env: { ...f.env, DAG_SESSION_ID: session.id } });
+    let error = '';
+    child.stderr.on('data', chunk => { error += chunk; });
+    child.once('error', reject);
+    child.once('exit', code => code === 0 ? resolve() : reject(new Error(error)));
+    child.stdin.end(JSON.stringify(event));
+  });
+  await report({ hook_event_name: 'SessionStart', session_id: 'claude-root' });
+  await f.cli('ready', 'worker');
+  const first = await f.cli('send', 'worker', 'already injected');
+  assert.equal(first.status, 'injected');
+  await report({ hook_event_name: 'StopFailure', session_id: 'another-thread', error: 'rate_limit' });
+  assert.equal((await f.cli('sessions'))[0].availability.state, 'available');
+  await report({ hook_event_name: 'StopFailure', session_id: 'claude-root', agent_id: 'child', error: 'rate_limit' });
+  assert.equal((await f.cli('sessions'))[0].availability.state, 'available');
+  await report({ hook_event_name: 'StopFailure', session_id: 'claude-root', error: 'rate_limit',
+    error_details: "You've hit your session limit · resets 1am (America/New_York)" });
+  let worker = (await f.cli('sessions'))[0];
+  assert.equal(worker.availability.source, 'claude');
+  assert.equal(worker.availability.state, 'cooldown');
+  assert.equal(worker.availability.retryAt, undefined, 'do not guess a timestamp from localized prose');
+  const held = await f.cli('send', 'worker', 'new message');
+  assert.equal(held.status, 'queued');
+  assert.equal(held.receiverAvailability.state, 'cooldown');
+  await f.cli('ready', 'worker');
+  assert.equal((await lines(log)).length, 2, 'ready cannot bypass the availability gate');
+  const printed = (await exec(process.execPath, [bin, 'send', 'worker', 'also queued'], { env: f.env })).stdout;
+  assert.match(printed, /Receiver cooldown/);
+  const graph = await f.cli('view', '--once');
+  assert.equal(graph.nodes[session.id].pending, 2);
+  assert.match(graph.nodes[session.id].deliveryNotice, /rate|session limit/i);
+  const dashboard = (await exec(process.execPath, [bin, 'view', '--once'], { env: f.env })).stdout;
+  assert.match(dashboard, /cooldown; queued 2/);
+  assert.match(dashboard, /session limit/);
+  const listing = (await exec(process.execPath, [bin, 'sessions'], { env: f.env })).stdout;
+  assert.match(listing, /AVAILABILITY/);
+  assert.match(listing, /dag resume worker/);
+  await f.cli('resume', 'worker');
+  await eventually(async () => (await lines(log)).length === 3);
+  assert.equal((await f.cli('messages')).find(m => m.id === first.id).status, 'injected');
+  assert.equal((await f.cli('sessions'))[0].pending, 1);
+  const until = new Date(Date.now() + 3600000).toISOString();
+  await f.cli('pause', 'worker', '--reason', 'operator hold', '--until', until);
+  await report({ type: 'rate_limit_event', session_id: 'claude-root', rate_limit_info: { status: 'rejected', resetsAt: Date.now() / 1000 + 7200 } });
+  worker = (await f.cli('sessions'))[0];
+  assert.equal(worker.availability.source, 'manual');
+  assert.equal(worker.availability.retryAt, until);
+  await assert.rejects(f.cli('pause', 'worker', '--until', '1am'), /future ISO/);
+  await f.cli('resume', 'worker');
+  await report({ type: 'rate_limit_event', session_id: 'claude-root', rate_limit_info: { status: 'rejected', resetsAt: 1792472400 } });
+  assert.equal((await f.cli('sessions'))[0].availability.retryAt, new Date(1792472400 * 1000).toISOString());
 });
 
 test('created child infers its parent and commands infer sender identity', async t => {

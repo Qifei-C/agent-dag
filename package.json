@@ -18,7 +18,7 @@
     "install:cli": "node cli/install.mjs",
     "test": "node --test test/*.test.mjs",
     "test:plugin": "claude plugin test .",
-    "check": "node --check bin/dag && node --check cli/main.mjs && node --check cli/service.mjs && node --check cli/store.mjs && node --check cli/tmux.mjs && node --check cli/install.mjs && node --check cli/codex.mjs && node --check cli/codex-events.mjs && node --check cli/codex-rpc.mjs && node --check cli/codex-launch.mjs && node --check cli/dashboard.mjs"
+    "check": "node --check bin/dag && node --check cli/main.mjs && node --check cli/service.mjs && node --check cli/store.mjs && node --check cli/tmux.mjs && node --check cli/install.mjs && node --check cli/codex.mjs && node --check cli/codex-events.mjs && node --check cli/codex-rpc.mjs && node --check cli/codex-launch.mjs && node --check cli/dashboard.mjs && node --check cli/availability.mjs && node --check cli/claude-hook.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0"

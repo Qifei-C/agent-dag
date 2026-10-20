@@ -20,6 +20,8 @@ const HELP = `dag — tmux sessions and recorded agent messages
   dag ack MESSAGE_ID [--session NAME]
   dag ready [NAME]                    Accept one queued/future terminal message
   dag busy [NAME]                     Queue incoming messages without injection
+  dag pause [NAME] [--reason TEXT] [--until ISO_TIME]
+  dag resume [NAME]                   Clear availability hold; keep readiness
   dag attach NAME                    Focus the registered pane
   dag messages                       Show the complete message history
 
@@ -39,6 +41,9 @@ It releases names and pane bindings, keeps message history, and does not stop ag
 The codex adapter creates a private local App Server and connects the native TUI.
 Codex messages use its native queue; busy pauses delivery, ready drains it.
 bind connects an existing registered pane to an exact Codex thread ID.
+pause blocks new delivery independently of ready/busy. --until records an
+expected reset time; it does not schedule a retry. resume requires confirmation
+of uncertain deliveries and never replays submitted or injected messages.
 `;
 
 const option = type => ({ type });
@@ -52,6 +57,7 @@ const OPTIONS = {
   send: { from: option('string'), 'reply-to': option('string'), file: option('string'), key: option('string') },
   inbox: { all: option('boolean') },
   ack: { session: option('string') },
+  pause: { reason: option('string'), until: option('string') }, resume: {},
   ready: {}, busy: {}, attach: {}, messages: {},
 };
 
@@ -59,13 +65,15 @@ const OPTIONS = {
 const printable = text => String(text).replace(/[\p{Cc}\p{Cf}]/gu, ' ');
 function rows(sessions) {
   if (!sessions.length) return 'No registered sessions. Run dag create NAME -- COMMAND.';
-  const out = ['SESSION                  STATUS    QUEUED  PANE    ADAPTER  ACTIVITY   ROLE'];
+  const out = ['SESSION                  STATUS    QUEUED  PANE    ADAPTER  ACTIVITY   AVAILABILITY  ROLE'];
   const visited = new Set();
   const walk = (s, depth) => {
     if (visited.has(s.id)) return;
     visited.add(s.id);
     const label = `${'  '.repeat(depth)}${s.name}`;
-    out.push(`${printable(label).padEnd(25)}${s.status.padEnd(10)}${String(s.pending).padEnd(8)}${s.pane.padEnd(8)}${(s.adapter || 'tmux').padEnd(9)}${(s.activity || '-').padEnd(11)}${printable(s.role)}`);
+    const availability = s.availability || { state: 'available' };
+    out.push(`${printable(label).padEnd(25)}${s.status.padEnd(10)}${String(s.pending).padEnd(8)}${s.pane.padEnd(8)}${(s.adapter || 'tmux').padEnd(9)}${(s.activity || '-').padEnd(11)}${availability.state.padEnd(14)}${printable(s.role)}`);
+    if (availability.state !== 'available') out.push(`  ${printable(availability.reason)}${availability.retryAt ? ` (expected reset ${availability.retryAt})` : ''}; resume: dag resume ${s.name}`);
     for (const child of sessions.filter(x => x.parentId === s.id)) walk(child, depth + 1);
   };
   for (const s of sessions.filter(s => !sessions.some(p => p.id === s.parentId))) walk(s, 0);
@@ -81,11 +89,15 @@ function output(value, json) {
       console.log(`${m.id}  ${printable(m.fromName)} -> ${printable(m.toName)}  ${m.status}${m.replyTo ? `  reply-to=${m.replyTo}` : ''}`);
       console.log(`  ${JSON.stringify(m.text)}`);
       if (m.error) console.log(`  ${printable(m.error)}`);
+      if (m.receiverAvailability && m.receiverAvailability.state !== 'available') {
+        console.log(`  Receiver ${m.receiverAvailability.state}: ${printable(m.receiverAvailability.reason)}${m.receiverAvailability.retryAt ? ` (expected reset ${m.receiverAvailability.retryAt})` : ''}. New delivery paused.`);
+      }
     }
   } else if ('text' in value) {
     output([value], false);
   } else {
     console.log(`${value.name}  ${value.id}  ${value.status}  ${value.pane}`);
+    if (value.availability) console.log(`  Availability: ${value.availability.state}${value.availability.reason ? ` — ${printable(value.availability.reason)}` : ''}${value.availability.retryAt ? ` (expected reset ${value.availability.retryAt})` : ''}`);
   }
 }
 
@@ -111,7 +123,7 @@ export async function main(args) {
   if (opts.watch && opts.json) throw new Error('--watch and --json cannot be combined.');
   if (command === 'view' && (opts.pane && opts.once || opts.json && !opts.once && !opts.pane)) throw new Error('Use view --json with --once or --pane; --pane cannot combine with --once.');
   const range = { create: [1, 1], register: [1, 1], unregister: [0, 1], bind: [0, 1], view: [0, 0], sessions: [0, 0], send: [1, opts.file ? 1 : 2],
-    inbox: [0, 1], ack: [1, 1], ready: [0, 1], busy: [0, 1], attach: [1, 1], messages: [0, 0] }[command];
+    inbox: [0, 1], ack: [1, 1], ready: [0, 1], busy: [0, 1], pause: [0, 1], resume: [0, 1], attach: [1, 1], messages: [0, 0] }[command];
   if (pos.length < range[0] || pos.length > range[1] || (command === 'send' && !opts.file && pos.length !== 2)) {
     throw new Error(`Invalid arguments for ${command}. Run dag --help.`);
   }
@@ -153,6 +165,8 @@ export async function main(args) {
     case 'send': result = await service.send(pos[0], opts.file ? await readFile(opts.file, 'utf8') : pos[1],
       { from: opts.from, replyTo: opts['reply-to'], key: opts.key }); break;
     case 'ready': case 'busy': result = await service.readiness(command, pos[0]); break;
+    case 'pause': result = await service.pause(pos[0], opts); break;
+    case 'resume': result = await service.resume(pos[0]); break;
     case 'inbox': result = await service.inbox(pos[0], opts.all); break;
     case 'ack': result = await service.ack(pos[0], opts.session); break;
     case 'messages': result = (await service.store.snapshot()).messages; break;

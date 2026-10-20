@@ -66,6 +66,21 @@ Delivery depends on the adapter:
   inspect the receiving terminal and inbox. Do not blindly replay it. Read and
   acknowledge the durable inbox entry before accepting another prompt.
 
+Availability is separate from ready/busy and runtime activity. On a usage limit,
+use `dag pause NAME --reason 'Usage limit reached'` if no automatic observation
+is available. `--until ISO_TIMESTAMP_WITH_TIMEZONE` records an expected reset,
+not an automatic retry. New messages stay queued; `dag send` returns the
+receiver's availability and reason. Check `dag sessions --json` and the inbox.
+Managed Codex observes structured root-thread limit errors; Claude's plugin
+command hooks observe `StopFailure.error`. A native client can continue its
+existing task on its own; never resend submitted/injected messages merely
+because a limit reset. Do not inject prompts into Claude's usage-limit wait,
+since new input can end the wait. After verifying recovery, use `dag resume NAME`
+to release new DAG messages. This preserves readiness and never replays messages;
+tmux still requires `dag ready` when it can accept input. Unconfirmed sending or
+uncertain deliveries must be inspected and acknowledged before resume. Neither
+idle telemetry nor ready/bind clears an availability hold.
+
 Use `dag attach NAME` to focus a session. For an offline session restarted in a
 new pane, `dag register NAME --target %PANE --replace` preserves its stable ID
 and inbox, and resets readiness to unknown. A replaced terminal loses its old

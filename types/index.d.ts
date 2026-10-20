@@ -25,6 +25,7 @@ export type AgentNode = {
   toolCount: number
   currentTool?: string
   recentTools: string[]
+  deliveryNotice?: string
 }
 
 export type MessageEdge = {
