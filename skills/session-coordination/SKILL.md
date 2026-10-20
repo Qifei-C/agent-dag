@@ -72,6 +72,13 @@ and inbox, and resets readiness to unknown. A replaced terminal loses its old
 Codex thread binding; bind the new process before native delivery. Never replace
 an active session.
 
+When a registration is no longer needed, use `dag unregister NAME` (or omit NAME
+for the current session). Use `dag unregister --offline` to remove all offline
+records. This releases names and pane bindings and removes telemetry without
+stopping agent processes. Message history is retained, remaining children become
+roots, and reusing a name creates a new identity with an empty inbox. Keep an
+offline registration if you intend to reconnect it with `register --replace`.
+
 `dag view` opens the shared card/tree dashboard; `dag view --pane` puts it in a
 separate tmux pane. `v` changes density, `m` toggles messages, `t` toggles tools,
 arrow keys scroll, and `q` closes the viewer. `dag view --once --json` returns a

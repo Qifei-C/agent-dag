@@ -10,6 +10,7 @@ const HELP = `dag — tmux sessions and recorded agent messages
 
   dag create NAME [--adapter tmux|codex] [--cwd DIR] [--role TEXT] [--parent NAME|none] [-- COMMAND ...]
   dag register NAME [--target PANE] [--role TEXT] [--parent NAME|none] [--replace]
+  dag unregister [NAME] [--offline]    Remove registration, or all offline records
   dag bind [NAME] [--thread ID] [--codex-socket PATH] [--codex-bin PATH]
   dag sessions [--watch]
   dag view [--pane] [--compact] [--ascii] [--once]
@@ -33,6 +34,8 @@ busy again. ack confirms receipt, not task completion. inbox never injects input
 Session and message IDs are stable; duplicate session names are rejected.
 --key makes send retries idempotent for a sender/receiver pair.
 register --replace preserves an offline session's identity and inbox on a new pane.
+unregister defaults to the current session; --offline removes all offline records.
+It releases names and pane bindings, keeps message history, and does not stop agents.
 The codex adapter creates a private local App Server and connects the native TUI.
 Codex messages use its native queue; busy pauses delivery, ready drains it.
 bind connects an existing registered pane to an exact Codex thread ID.
@@ -42,6 +45,7 @@ const option = type => ({ type });
 const OPTIONS = {
   create: { cwd: option('string'), role: option('string'), parent: option('string'), adapter: option('string') },
   register: { target: option('string'), role: option('string'), parent: option('string'), replace: option('boolean') },
+  unregister: { offline: option('boolean') },
   bind: { thread: option('string'), 'codex-socket': option('string'), 'codex-bin': option('string') },
   view: { pane: option('boolean'), compact: option('boolean'), ascii: option('boolean'), once: option('boolean') },
   sessions: { watch: option('boolean') },
@@ -106,7 +110,7 @@ export async function main(args) {
   if (opts.help) { console.log(HELP); return; }
   if (opts.watch && opts.json) throw new Error('--watch and --json cannot be combined.');
   if (command === 'view' && (opts.pane && opts.once || opts.json && !opts.once && !opts.pane)) throw new Error('Use view --json with --once or --pane; --pane cannot combine with --once.');
-  const range = { create: [1, 1], register: [1, 1], bind: [0, 1], view: [0, 0], sessions: [0, 0], send: [1, opts.file ? 1 : 2],
+  const range = { create: [1, 1], register: [1, 1], unregister: [0, 1], bind: [0, 1], view: [0, 0], sessions: [0, 0], send: [1, opts.file ? 1 : 2],
     inbox: [0, 1], ack: [1, 1], ready: [0, 1], busy: [0, 1], attach: [1, 1], messages: [0, 0] }[command];
   if (pos.length < range[0] || pos.length > range[1] || (command === 'send' && !opts.file && pos.length !== 2)) {
     throw new Error(`Invalid arguments for ${command}. Run dag --help.`);
@@ -116,6 +120,13 @@ export async function main(args) {
   switch (command) {
     case 'create': result = await service.create(pos[0], { ...opts, command: launch }); break;
     case 'register': result = await service.register(pos[0], opts); break;
+    case 'unregister': {
+      const removed = await service.unregister(pos[0], opts);
+      if (opts.json) console.log(JSON.stringify(removed, null, 2));
+      else if (!removed.length) console.log('No offline sessions to unregister.');
+      else for (const session of removed) console.log(`Unregistered ${session.name} (${session.id}).`);
+      return;
+    }
     case 'bind': result = await service.bindCodex(pos[0], {
       threadId: opts.thread || process.env.CODEX_THREAD_ID, socketPath: opts['codex-socket'], executable: opts['codex-bin'],
       inferred: !opts.thread,

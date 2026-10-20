@@ -54,7 +54,14 @@ export async function dashboardState(service) {
 }
 
 async function observeExternal(service, observers) {
-  for (const session of (await service.store.snapshot()).sessions) {
+  const { sessions } = await service.store.snapshot();
+  for (const [id, rpc] of observers) {
+    if (!sessions.some(s => s.id === id)) {
+      observers.delete(id);
+      rpc?.close();
+    }
+  }
+  for (const session of sessions) {
     if (!session.codex || session.codex.managed || observers.has(session.id)) continue;
     if (!service.tmux.inspect(session).online) continue;
     observers.set(session.id, null);

@@ -38,6 +38,15 @@ export class Tmux {
 
   bind(pane, id) { this.run(['set-option', '-p', '-t', pane, '@dag_session_id', id]); }
 
+  unbind(session) {
+    const { pane } = this.inspect(session);
+    // Offline includes dead panes and panes now owned by another registration.
+    // Clear only our own binding, even when its process has already exited.
+    if (pane?.['@dag_session_id'] === session.id) {
+      new Tmux(session.socket).run(['set-option', '-p', '-u', '-t', session.pane, '@dag_session_id']);
+    }
+  }
+
   inspect(session) {
     try {
       const pane = new Tmux(session.socket).pane(session.pane);

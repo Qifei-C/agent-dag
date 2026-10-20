@@ -30,7 +30,12 @@ export class Service {
 
   current(state, explicit, optional = false) {
     if (explicit) return findSession(state, explicit);
-    if (process.env.DAG_SESSION_ID) return findSession(state, process.env.DAG_SESSION_ID);
+    if (process.env.DAG_SESSION_ID) {
+      const session = state.sessions.find(s => s.id === process.env.DAG_SESSION_ID);
+      if (session) return session;
+      // unregister cannot change an already running process's environment.
+      // Fall back to its current pane binding when the inherited ID is stale.
+    }
     if (process.env.TMUX_PANE) {
       try {
         const pane = new Tmux(Tmux.callerSocket()).pane(process.env.TMUX_PANE);
@@ -129,6 +134,26 @@ export class Service {
       if (!existing) state.sessions.push(session);
       await this.store.save(state);
       return session;
+    });
+  }
+
+  async unregister(ref, { offline = false } = {}) {
+    if (offline && ref) throw new Error('Use unregister NAME or unregister --offline, not both.');
+    return this.store.locked(async state => {
+      const removed = offline ? state.sessions.filter(s => !this.tmux.inspect(s).online)
+        : [this.current(state, ref)];
+      const ids = new Set(removed.map(s => s.id));
+      for (const session of removed) this.tmux.unbind(session);
+      state.sessions = state.sessions.filter(s => !ids.has(s.id));
+      for (const session of state.sessions) {
+        if (ids.has(session.parentId)) {
+          delete session.parentId;
+          session.updatedAt = now();
+        }
+      }
+      for (const id of ids) if (state.observations) delete state.observations[id];
+      if (removed.length) await this.store.save(state);
+      return removed;
     });
   }
 

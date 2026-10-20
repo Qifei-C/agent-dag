@@ -173,6 +173,71 @@ test('offline session can rebind with the same identity and pending inbox', asyn
   assert.equal((await f.cli('inbox', 'worker'))[0].id, message.id);
 });
 
+test('unregister releases identity and pane, preserves history, and makes children roots', async t => {
+  const f = await fixture(t);
+  const { session } = await f.create('parent');
+  const { session: child } = await f.create('child', '--parent', 'parent');
+  const message = await f.cli('send', 'parent', 'retained history', '--from', 'child');
+  const store = new Store(f.home);
+  await store.locked(async state => {
+    state.observations = { [session.id]: { nodes: {} }, [child.id]: { nodes: {} } };
+    await store.save(state);
+  });
+  const removed = await f.cli('unregister', session.id, '--socket', join(f.root, 'unused.sock'));
+  assert.equal(removed[0].id, session.id);
+  assert.equal(f.tmux('display-message', '-p', '-t', session.pane, '#{pane_dead}'), '0');
+  assert.equal(f.tmux('show-options', '-p', '-t', session.pane).includes('@dag_session_id'), false);
+  const state = await store.snapshot();
+  assert.deepEqual(state.sessions.map(s => s.id), [child.id]);
+  assert.equal(state.sessions[0].parentId, undefined);
+  assert.equal(state.observations[session.id], undefined);
+  assert.ok(state.observations[child.id]);
+  assert.equal((await f.cli('messages'))[0].id, message.id);
+  await assert.rejects(f.cli('send', 'parent', 'no receiver'), /Unknown session/);
+  const replacement = await f.cli('register', 'parent', '--target', session.pane);
+  assert.notEqual(replacement.id, session.id);
+  assert.deepEqual(await f.cli('inbox', 'parent'), [], 'old messages never move to a reused name');
+});
+
+test('unregister infers the current session and tolerates a stale inherited identity afterward', async t => {
+  const f = await fixture(t);
+  const { session, log } = await f.create('worker');
+  const startup = (await lines(log))[0];
+  const currentEnv = { ...f.env, DAG_SESSION_ID: session.id, TMUX: startup.tmux, TMUX_PANE: session.pane };
+  const removed = await exec(process.execPath, [bin, 'unregister', '--json'], { env: currentEnv });
+  assert.equal(JSON.parse(removed.stdout)[0].id, session.id);
+  await assert.rejects(f.cli('unregister', 'worker'), /Unknown session/);
+  await assert.rejects(f.cli('unregister'), /No current session/);
+  await assert.rejects(f.cli('unregister', 'worker', '--offline'), /not both/);
+  const registered = JSON.parse((await exec(process.execPath,
+    [bin, 'register', 'worker', '--json'], { env: currentEnv })).stdout);
+  const sent = JSON.parse((await exec(process.execPath,
+    [bin, 'send', 'worker', 'new identity', '--json'], { env: currentEnv })).stdout);
+  assert.equal(sent.from, registered.id, 'pane binding supersedes the unregistered environment ID');
+});
+
+test('unregister --offline removes closed, dead and rebound panes while leaving live sessions alone', async t => {
+  const f = await fixture(t);
+  const { session: live } = await f.create('live');
+  const { session: closed } = await f.create('closed');
+  const { session: dead } = await f.create('dead');
+  const { session: foreign } = await f.create('foreign');
+  f.tmux('kill-session', '-t', closed.tmuxSession);
+  f.tmux('set-option', '-p', '-t', dead.pane, 'remain-on-exit', 'on');
+  f.tmux('respawn-pane', '-k', '-t', dead.pane, '/usr/bin/true');
+  await eventually(async () => f.tmux('display-message', '-p', '-t', dead.pane, '#{pane_dead}') === '1');
+  f.tmux('set-option', '-p', '-t', foreign.pane, '@dag_session_id', 'another-registry');
+  const removed = await f.cli('unregister', '--offline');
+  assert.deepEqual(new Set(removed.map(s => s.id)), new Set([closed.id, dead.id, foreign.id]));
+  assert.deepEqual((await f.cli('sessions')).map(s => s.id), [live.id]);
+  assert.equal(f.tmux('show-options', '-p', '-t', dead.pane).includes('@dag_session_id'), false);
+  assert.equal(f.tmux('display-message', '-p', '-t', foreign.pane, '#{@dag_session_id}'), 'another-registry');
+  assert.deepEqual(await f.cli('unregister', '--offline'), []);
+  const text = (await exec(process.execPath, [bin, 'unregister', 'live'], { env: f.env })).stdout;
+  assert.match(text, /Unregistered live/);
+  assert.deepEqual(await f.cli('sessions'), []);
+});
+
 test('created child infers its parent and commands infer sender identity', async t => {
   const f = await fixture(t);
   const { session } = await f.create('parent');

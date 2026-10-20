@@ -73,6 +73,21 @@ session to a new pane, preserving its ID and inbox. Readiness resets to unknown.
 Pane bindings and server sockets are checked before injection, including after
 tmux server restarts, so a recycled pane ID is not sufficient to receive input.
 
+Remove registrations that are no longer needed:
+
+```sh
+dag unregister reviewer          # name or session ID
+dag unregister                   # current registered session
+dag unregister --offline         # all offline registrations
+```
+
+Unregistering releases the name and matching pane binding and removes its Codex
+telemetry. It leaves the agent process running and preserves message history;
+remaining children become roots. Registering the same name again creates a new
+identity with an empty inbox. `--json` returns an array of removed sessions.
+Closed sessions remain offline until explicitly unregistered, so they can still
+be reconnected with `register --replace` when their identity and inbox are needed.
+
 ## Codex adapter
 
 Tested with Codex CLI 0.163.0. Requires native `codex queue` and App Server Unix
@@ -226,6 +241,7 @@ Core CLI commands:
 | --- | --- |
 | `dag create NAME -- COMMAND` | Create and register a detached tmux session. |
 | `dag register NAME` | Register the current tmux pane. |
+| `dag unregister [NAME] [--offline]` | Remove a registration, or clean up all offline records. |
 | `dag bind [NAME]` | Bind a registered pane to its exact Codex thread. |
 | `dag send NAME TEXT` | Queue a message for a registered session. |
 | `dag inbox [NAME]` | Read messages for the current or named session. |

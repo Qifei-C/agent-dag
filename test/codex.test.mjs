@@ -10,7 +10,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { applyCodexEvent } from '../cli/codex-events.mjs';
 import { CodexRpc } from '../cli/codex-rpc.mjs';
-import { CodexAdapter, validateBinding } from '../cli/codex.mjs';
+import { CodexAdapter, observationSink, validateBinding } from '../cli/codex.mjs';
 import { parseCodexLaunch } from '../cli/codex-launch.mjs';
 import { Service } from '../cli/service.mjs';
 import { Store } from '../cli/store.mjs';
@@ -124,6 +124,21 @@ test('managed Codex: automatic binding, native messages, telemetry, subagents, p
   await eventually(async () => (await entries(f.log)).some(x => x.type === 'server-stop'));
   await eventually(async () => { try { await stat(session.codex.socketPath); return false; } catch { return true; } });
   assert.equal((await f.cli('sessions'))[0].status, 'offline');
+});
+
+test('unregister removes Codex telemetry and late events cannot recreate it', async t => {
+  const f = await fixture(t);
+  const session = await f.create();
+  const sink = observationSink(f.store, session.id, session.codex.threadId);
+  await f.cli('unregister', 'coder');
+  await sink.push({ method: 'thread/started', params: { thread: { id: session.codex.threadId } } });
+  await sink.error(new Error('late disconnect'));
+  const state = await f.store.snapshot();
+  assert.deepEqual(state.sessions, []);
+  assert.equal(state.observations?.[session.id], undefined);
+  assert.deepEqual((await f.cli('view', '--once')).order, ['main']);
+  assert.equal(f.tmux('display-message', '-p', '-t', session.pane, '#{pane_dead}'), '0');
+  assert.equal((await entries(f.log)).some(x => x.type === 'server-stop'), false);
 });
 
 test('standalone dashboard opens in a separate tmux pane and handles density and quit keys', async t => {
