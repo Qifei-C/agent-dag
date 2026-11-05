@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { randomUUID } from 'node:crypto';
 
 const FIELDS = ['pane_id', 'session_id', 'session_name', 'socket_path', 'pane_dead',
   'pane_current_path', '@dag_session_id', 'pane_in_mode', 'pane_input_off', 'pane_synchronized'];
@@ -64,8 +65,19 @@ export class Tmux {
     }
     // The envelope is one JSON-escaped line. No message content is interpreted
     // as tmux keys, shell syntax, control codes, or an extra Return.
-    tmux.run(['send-keys', '-l', '-t', session.pane, '--', text]);
-    await delay(100);
+    // Explicit bracketed paste avoids classifying the trailing Enter as part
+    // of a synthetic typing burst. Codex 0.163.0 suppresses Enter for 120ms;
+    // the former 100ms delay could leave a message in the composer forever.
+    // Use a private, one-shot buffer, never the user's default paste buffer.
+    const buffer = `dag-${randomUUID()}`;
+    tmux.run(['set-buffer', '-b', buffer, '--', text]);
+    try {
+      tmux.run(['paste-buffer', '-p', '-d', '-b', buffer, '-t', session.pane]);
+    } catch (error) {
+      try { tmux.run(['delete-buffer', '-b', buffer]); } catch {}
+      throw error;
+    }
+    await delay(750);
     tmux.run(['send-keys', '-t', session.pane, 'Enter']);
   }
 }
