@@ -85,8 +85,40 @@ Unregistering releases the name and matching pane binding and removes its Codex
 telemetry. It leaves the agent process running and preserves message history;
 remaining children become roots. Registering the same name again creates a new
 identity with an empty inbox. `--json` returns an array of removed sessions.
-Closed sessions remain offline until explicitly unregistered, so they can still
-be reconnected with `register --replace` when their identity and inbox are needed.
+
+Undelivered messages to a removed session (`queued`, `sending`, `uncertain`) become
+`orphaned`, keeping their previous status in `orphanedFrom`. Agent senders are told
+which messages were affected. Orphaned messages are never replayed.
+
+### When a pane goes away
+
+A session is `offline` only when tmux proves the pane is gone: the pane or server no
+longer exists, the pane is dead, or its binding belongs to someone else. If tmux
+cannot answer (timeout, permission or sandbox error, missing binary, or a missing
+socket file for a session updated since this boot, which a private `/tmp` also
+produces), presence is `unknown` and the status shows `offline?`. Unknown never
+starts the removal clock. After a reboot a missing socket does count as gone.
+
+1. Its parent, children and any session whose last exchange with it went unanswered
+   receive a queued `session-offline` message from `dag`. Normal delivery rules
+   apply: busy or paused recipients keep it queued. A notice that fails to inject
+   stays queued, and notices never block later delivery. `dag` and `person` are
+   reserved sender names.
+2. During the grace period (`DAG_OFFLINE_TTL`, default 600 seconds) the name stays
+   reserved, and `dag register NAME --target %PANE --replace` restores its identity
+   and inbox. Those sessions then receive `session-online`.
+3. After the grace period the record is removed as if unregistered: the name is
+   released, children become roots, undelivered messages are orphaned and their
+   senders receive `session-removed`. `DAG_OFFLINE_TTL=0` skips the grace period.
+
+`dag send` to an offline session still queues, and reports `receiverPresence` with
+`state`, `since` and `removesAt`. `dag sessions --json` has the same `presence`.
+
+Every `dag` command checks for these transitions, and starts a small background
+watcher (one per `DAG_HOME`, `watcher.pid`) that checks every `DAG_WATCH_INTERVAL`
+seconds, default 5, so notices arrive even when nothing else is running. The watcher
+exits when no sessions remain and records its last error in `watcher.error`.
+`DAG_WATCH=off` disables it. It does not change tmux configuration.
 
 ## Codex adapter
 

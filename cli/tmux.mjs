@@ -1,10 +1,24 @@
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
+import { uptime } from 'node:os';
 
 const FIELDS = ['pane_id', 'session_id', 'session_name', 'socket_path', 'pane_dead',
   'pane_current_path', '@dag_session_id', 'pane_in_mode', 'pane_input_off', 'pane_synchronized'];
 const FORMAT = FIELDS.map(key => `#{${key}}`).join('\t');
+
+// Only proof of absence counts as gone, because auto-removal acts on this answer.
+// Timeouts, a missing client binary and permission errors say nothing about the
+// pane. A missing socket is not proof either: a private /tmp or a tmp cleaner hides
+// a live server's socket. See predatesBoot for the case where it is conclusive.
+const GONE = /no server running|error connecting to .* \(Connection refused\)|can't find (?:pane|window|session)/;
+const MISSING_SOCKET = /error connecting to .* \(No such file or directory\)/;
+const INSPECT_TIMEOUT_MS = 2000;
+export const isGoneError = message => GONE.test(message);
+
+// No tmux server survives a reboot, so a record untouched since before this boot
+// cannot have a live pane however its socket looks.
+const predatesBoot = session => Date.parse(session.updatedAt) < Date.now() - uptime() * 1000;
 
 export class Tmux {
   constructor(socket = process.env.DAG_TMUX_SOCKET) { this.socket = socket; }
@@ -16,12 +30,12 @@ export class Tmux {
     return value.slice(0, value.lastIndexOf(',', value.lastIndexOf(',') - 1));
   }
 
-  run(args) {
+  run(args, { timeout = 10000 } = {}) {
     // tmux parses a trailing semicolon as a command separator even when it
     // receives argv directly. Escape that parser layer, without invoking sh.
     const literalArgs = args.map(arg => String(arg).replace(/;$/, '\\;'));
     const result = spawnSync('tmux', [...(this.socket ? ['-S', this.socket] : []), ...literalArgs], {
-      encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024,
+      encoding: 'utf8', timeout, maxBuffer: 1024 * 1024,
     });
     if (result.error) throw new Error(`tmux: ${result.error.message}`);
     if (result.status !== 0 || /^error (creating|connecting)/m.test(result.stderr)) {
@@ -30,9 +44,11 @@ export class Tmux {
     return result.stdout.trimEnd();
   }
 
-  pane(target) {
-    const text = this.run(['display-message', '-p', '-t', target, FORMAT]);
+  pane(target, options) {
+    const text = this.run(['display-message', '-p', '-t', target, FORMAT], options);
     const values = text.split('\t');
+    // A live server answers a missing pane with status 0 and empty pane fields.
+    if (values[0] === '') throw Object.assign(new Error('Could not resolve tmux pane.'), { gone: true });
     if (!/^%\d+$/.test(values[0]) || values.length !== FIELDS.length) throw new Error('Could not resolve tmux pane.');
     return Object.fromEntries(FIELDS.map((key, i) => [key, values[i]]));
   }
@@ -50,10 +66,14 @@ export class Tmux {
 
   inspect(session) {
     try {
-      const pane = new Tmux(session.socket).pane(session.pane);
+      const pane = new Tmux(session.socket).pane(session.pane, { timeout: INSPECT_TIMEOUT_MS });
       const online = pane['@dag_session_id'] === session.id && pane.pane_dead === '0';
-      return { online, pane };
-    } catch (error) { return { online: false, error: error.message }; }
+      return { online, offline: !online, pane };
+    } catch (error) {
+      const offline = error.gone === true || isGoneError(error.message)
+        || (MISSING_SOCKET.test(error.message) && predatesBoot(session));
+      return { online: false, offline, timedOut: /ETIMEDOUT/.test(error.message), error: error.message };
+    }
   }
 
   async inject(session, text) {

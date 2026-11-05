@@ -18,7 +18,7 @@ import { Store } from '../cli/store.mjs';
 const execute = promisify(execFile);
 const bin = fileURLToPath(new URL('../bin/dag', import.meta.url));
 const fake = fileURLToPath(new URL('./fake-codex.mjs', import.meta.url));
-const env = { ...process.env };
+const env = { ...process.env, DAG_WATCH: 'off' };
 for (const key of ['DAG_HOME', 'DAG_SESSION_ID', 'DAG_TMUX_SOCKET', 'DAG_CODEX_SOCKET', 'CODEX_THREAD_ID', 'TMUX', 'TMUX_PANE']) delete env[key];
 
 async function eventually(check) {

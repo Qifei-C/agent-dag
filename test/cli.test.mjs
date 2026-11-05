@@ -12,7 +12,7 @@ import { Service } from '../cli/service.mjs';
 const exec = promisify(execFile);
 const bin = fileURLToPath(new URL('../bin/dag', import.meta.url));
 const receiver = fileURLToPath(new URL('./receiver.mjs', import.meta.url));
-const cleanEnv = { ...process.env };
+const cleanEnv = { ...process.env, DAG_WATCH: 'off' };
 for (const key of ['DAG_HOME', 'DAG_SESSION_ID', 'DAG_TMUX_SOCKET', 'TMUX', 'TMUX_PANE']) delete cleanEnv[key];
 
 async function fixture(t) {
@@ -23,7 +23,7 @@ async function fixture(t) {
     spawnSync('tmux', ['-S', socket, 'kill-server'], { encoding: 'utf8' });
     await rm(root, { recursive: true, force: true });
   });
-  const start = spawnSync('tmux', ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', 'anchor', '/bin/cat'], { encoding: 'utf8' });
+  const start = spawnSync('tmux', ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', 'anchor', '/bin/cat'], { encoding: 'utf8', env: cleanEnv });
   assert.equal(start.status, 0, `isolated tmux server: ${start.stderr}`);
   assert.equal(start.stderr, '', `isolated tmux server: ${start.stderr}`);
   const env = { ...cleanEnv, DAG_HOME: home, DAG_TMUX_SOCKET: socket };

@@ -91,8 +91,16 @@ When a registration is no longer needed, use `dag unregister NAME` (or omit NAME
 for the current session). Use `dag unregister --offline` to remove all offline
 records. This releases names and pane bindings and removes telemetry without
 stopping agent processes. Message history is retained, remaining children become
-roots, and reusing a name creates a new identity with an empty inbox. Keep an
-offline registration if you intend to reconnect it with `register --replace`.
+roots, and reusing a name creates a new identity with an empty inbox.
+
+A session whose pane is gone becomes `offline`. Its parent, children and peers
+waiting on it receive a message from `dag` (`session-offline`). Its record is removed
+automatically after `DAG_OFFLINE_TTL` (default 10 minutes), so reconnect with
+`register --replace` before then to keep its identity and inbox. `dag send` output and
+`receiverPresence` say when a receiver is offline: do not wait for a reply from one.
+Undelivered messages to a removed session become `orphaned` and are not replayed, and
+their senders receive `session-removed`; reroute that work to another session.
+`offline?` means tmux could not be reached, not that the session is gone.
 
 `dag view` opens the shared card/tree dashboard; `dag view --pane` puts it in a
 separate tmux pane. `v` changes density, `m` toggles messages, `t` toggles tools,

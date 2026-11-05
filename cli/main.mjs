@@ -5,6 +5,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Service } from './service.mjs';
 import { Store } from './store.mjs';
 import { Tmux } from './tmux.mjs';
+import { offlineTtlMs, watchIntervalMs } from './presence.mjs';
+import { ensureWatcher, runWatcher } from './watcher.mjs';
 
 const HELP = `dag — tmux sessions and recorded agent messages
 
@@ -24,9 +26,11 @@ const HELP = `dag — tmux sessions and recorded agent messages
   dag resume [NAME]                   Clear availability hold; keep readiness
   dag attach NAME                    Focus the registered pane
   dag messages                       Show the complete message history
+  dag watch                          Run the offline watcher (normally auto-started)
 
 Options: --json, --home DIR, --socket PATH, --help
 Environment: DAG_HOME, DAG_TMUX_SOCKET, DAG_SESSION_ID
+Offline: DAG_OFFLINE_TTL (seconds, default 600), DAG_WATCH=off, DAG_WATCH_INTERVAL (seconds, default 5)
 Codex: DAG_CODEX_BIN, DAG_CODEX_SOCKET, CODEX_THREAD_ID, CODEX_HOME
 
 create starts a detached tmux session (default: your shell). Commands after --
@@ -38,6 +42,9 @@ Session and message IDs are stable; duplicate session names are rejected.
 register --replace preserves an offline session's identity and inbox on a new pane.
 unregister defaults to the current session; --offline removes all offline records.
 It releases names and pane bindings, keeps message history, and does not stop agents.
+A session whose pane is gone is told to its parent, children and waiting senders,
+then removed after DAG_OFFLINE_TTL. Undelivered messages to a removed session
+become orphaned and their senders are told. An unreachable tmux removes nothing.
 The codex adapter creates a private local App Server and connects the native TUI.
 Codex messages use its native queue; busy pauses delivery, ready drains it.
 bind connects an existing registered pane to an exact Codex thread ID.
@@ -58,7 +65,7 @@ const OPTIONS = {
   inbox: { all: option('boolean') },
   ack: { session: option('string') },
   pause: { reason: option('string'), until: option('string') }, resume: {},
-  ready: {}, busy: {}, attach: {}, messages: {},
+  ready: {}, busy: {}, attach: {}, messages: {}, watch: {},
 };
 
 // Terminal labels are untrusted too (roles, paths, imported session names).
@@ -73,6 +80,8 @@ function rows(sessions) {
     const label = `${'  '.repeat(depth)}${s.name}`;
     const availability = s.availability || { state: 'available' };
     out.push(`${printable(label).padEnd(25)}${s.status.padEnd(10)}${String(s.pending).padEnd(8)}${s.pane.padEnd(8)}${(s.adapter || 'tmux').padEnd(9)}${(s.activity || '-').padEnd(11)}${availability.state.padEnd(14)}${printable(s.role)}`);
+    if (s.presence?.state === 'offline') out.push(`  offline${s.presence.since ? ` since ${s.presence.since}; auto-removes at ${s.presence.removesAt}` : ''}; reconnect: dag register ${s.name} --target PANE --replace`);
+    if (s.presence?.state === 'unknown') out.push(`  tmux unreachable, presence unknown (not counted as offline): ${printable(s.error || '')}`);
     if (availability.state !== 'available') out.push(`  ${printable(availability.reason)}${availability.retryAt ? ` (expected reset ${availability.retryAt})` : ''}; resume: dag resume ${s.name}`);
     for (const child of sessions.filter(x => x.parentId === s.id)) walk(child, depth + 1);
   };
@@ -89,6 +98,10 @@ function output(value, json) {
       console.log(`${m.id}  ${printable(m.fromName)} -> ${printable(m.toName)}  ${m.status}${m.replyTo ? `  reply-to=${m.replyTo}` : ''}`);
       console.log(`  ${JSON.stringify(m.text)}`);
       if (m.error) console.log(`  ${printable(m.error)}`);
+      if (m.receiverPresence?.state === 'offline') {
+        console.log(`  Receiver offline${m.receiverPresence.since ? ` since ${m.receiverPresence.since}; record removed at ${m.receiverPresence.removesAt}` : ''}. Reconnect: dag register ${printable(m.toName)} --target PANE --replace`);
+      }
+      if (m.receiverPresence?.state === 'unknown') console.log('  Receiver presence unknown: tmux is unreachable from here.');
       if (m.receiverAvailability && m.receiverAvailability.state !== 'available') {
         console.log(`  Receiver ${m.receiverAvailability.state}: ${printable(m.receiverAvailability.reason)}${m.receiverAvailability.retryAt ? ` (expected reset ${m.receiverAvailability.retryAt})` : ''}. New delivery paused.`);
       }
@@ -123,11 +136,23 @@ export async function main(args) {
   if (opts.watch && opts.json) throw new Error('--watch and --json cannot be combined.');
   if (command === 'view' && (opts.pane && opts.once || opts.json && !opts.once && !opts.pane)) throw new Error('Use view --json with --once or --pane; --pane cannot combine with --once.');
   const range = { create: [1, 1], register: [1, 1], unregister: [0, 1], bind: [0, 1], view: [0, 0], sessions: [0, 0], send: [1, opts.file ? 1 : 2],
-    inbox: [0, 1], ack: [1, 1], ready: [0, 1], busy: [0, 1], pause: [0, 1], resume: [0, 1], attach: [1, 1], messages: [0, 0] }[command];
+    inbox: [0, 1], ack: [1, 1], ready: [0, 1], busy: [0, 1], pause: [0, 1], resume: [0, 1], attach: [1, 1], messages: [0, 0], watch: [0, 0] }[command];
   if (pos.length < range[0] || pos.length > range[1] || (command === 'send' && !opts.file && pos.length !== 2)) {
     throw new Error(`Invalid arguments for ${command}. Run dag --help.`);
   }
-  const service = new Service({ store: new Store(opts.home), tmux: new Tmux(opts.socket) });
+  const service = new Service({ store: new Store(opts.home), tmux: new Tmux(opts.socket), offlineTtl: offlineTtlMs() });
+  watchIntervalMs(); // Fail on a bad value here, not silently in the detached watcher.
+  if (command === 'watch') { await runWatcher(service); return; }
+  // Housekeeping must never fail or block the command the user actually asked for.
+  const housekeeping = async step => {
+    try { await step(); } catch (error) { console.error(`dag: offline check skipped: ${error.message}`); }
+  };
+  await housekeeping(async () => { if (await service.reconcile() > 0) await ensureWatcher(service.store.home); });
+  await run(command, service, pos, opts, launch);
+  if (command === 'create' || command === 'register') await housekeeping(() => ensureWatcher(service.store.home));
+}
+
+async function run(command, service, pos, opts, launch) {
   let result;
   switch (command) {
     case 'create': result = await service.create(pos[0], { ...opts, command: launch }); break;

@@ -7,10 +7,15 @@ import { Tmux } from './tmux.mjs';
 import { CodexAdapter, validateBinding } from './codex.mjs';
 import { applyCodexEvent } from './codex-events.mjs';
 import { availabilityOf, isAvailable, setLimit, codexLimit, claudeLimit } from './availability.mjs';
+import { SYSTEM_SENDER, notice, offlineText, offlineTtlMs, onlineText, orphanMessages, presenceOf, relatedSessions, removedText } from './presence.mjs';
 
 const BIN = fileURLToPath(new URL('../bin/', import.meta.url));
 const now = () => new Date().toISOString();
+// A system notice must not stop an agent receiving real work, so only peer
+// messages hold up delivery until they are confirmed.
+const blocksDelivery = m => ['sending', 'uncertain'].includes(m.status) && m.from !== SYSTEM_SENDER;
 const validName = name => {
+  if (name === SYSTEM_SENDER || name === 'person') throw new Error(`Name ${name} is reserved for message senders.`);
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name || '')) {
     throw new Error('Name must be 1–64 letters, digits, underscores or hyphens, starting with a letter or digit.');
   }
@@ -23,11 +28,14 @@ export function findSession(state, ref) {
 }
 
 export class Service {
-  constructor({ store = new Store(), tmux = new Tmux(), codex = new CodexAdapter() } = {}) {
+  constructor({ store = new Store(), tmux = new Tmux(), codex = new CodexAdapter(), offlineTtl } = {}) {
     this.store = store;
     this.tmux = tmux;
     this.codex = codex;
+    this.offlineTtl = offlineTtl;
   }
+
+  ttl() { return this.offlineTtl ?? offlineTtlMs(); }
 
   current(state, explicit, optional = false) {
     if (explicit) return findSession(state, explicit);
@@ -142,28 +150,107 @@ export class Service {
   async unregister(ref, { offline = false } = {}) {
     if (offline && ref) throw new Error('Use unregister NAME or unregister --offline, not both.');
     return this.store.locked(async state => {
-      const removed = offline ? state.sessions.filter(s => !this.tmux.inspect(s).online)
+      const removed = offline ? state.sessions.filter(s => this.tmux.inspect(s).offline)
         : [this.current(state, ref)];
-      const ids = new Set(removed.map(s => s.id));
-      for (const session of removed) this.tmux.unbind(session);
-      state.sessions = state.sessions.filter(s => !ids.has(s.id));
-      for (const session of state.sessions) {
-        if (ids.has(session.parentId)) {
-          delete session.parentId;
-          session.updatedAt = now();
-        }
-      }
-      for (const id of ids) if (state.observations) delete state.observations[id];
-      if (removed.length) await this.store.save(state);
+      if (!removed.length) return removed;
+      const recipients = this.removeSessions(state, removed, { notifyRelated: !offline });
+      await this.store.save(state);
+      await this.deliverTo(state, recipients);
       return removed;
     });
+  }
+
+  // Applies a removal to state and queues its notices; the caller saves, then
+  // delivers. Related sessions already heard about an expiry when it went offline.
+  removeSessions(state, removed, { notifyRelated }) {
+    const at = now();
+    const ids = new Set(removed.map(s => s.id));
+    const recipients = new Map();
+    const related = removed.map(s => (notifyRelated ? relatedSessions(state, s) : []));
+    for (const session of removed) this.tmux.unbind(session);
+    state.sessions = state.sessions.filter(s => !ids.has(s.id));
+    for (const session of state.sessions) {
+      if (ids.has(session.parentId)) {
+        delete session.parentId;
+        session.updatedAt = at;
+      }
+    }
+    for (const id of ids) if (state.observations) delete state.observations[id];
+    const orphaned = orphanMessages(state, ids, at);
+    removed.forEach((session, index) => {
+      const mine = orphaned.filter(m => m.to === session.id);
+      const targets = new Set([...related[index].map(s => s.id), ...mine.map(m => m.from)]);
+      for (const recipient of state.sessions.filter(s => targets.has(s.id) && !this.tmux.inspect(s).offline)) {
+        const own = mine.filter(m => m.from === recipient.id);
+        state.messages.push(notice(recipient, 'session-removed', session, removedText(session, own), at));
+        recipients.set(recipient.id, recipient);
+      }
+    });
+    return [...recipients.values()];
+  }
+
+  async deliverTo(state, sessions) {
+    for (const session of sessions) await this.drain(state, session);
+  }
+
+  // Detection runs on every CLI call and watcher tick, so the steady state must
+  // stay lock-free. Saves are atomic renames, making the unlocked read safe.
+  async reconcile() {
+    const snapshot = await this.store.read();
+    const ttl = this.ttl();
+    let changed = false;
+    for (const s of snapshot.sessions) {
+      const live = this.tmux.inspect(s);
+      // A hung server would stall every command per session, then again in the lock.
+      if (live.timedOut) return snapshot.sessions.length;
+      if (live.online ? !!s.offlineSince : live.offline && (!s.offlineSince || Date.now() - Date.parse(s.offlineSince) >= ttl)) changed = true;
+    }
+    if (!changed) return snapshot.sessions.length;
+    return this.store.locked(state => this.applyTransitions(state, ttl));
+  }
+
+  async applyTransitions(state, ttl) {
+    const at = now();
+    const lives = new Map(state.sessions.map(s => [s.id, this.tmux.inspect(s)]));
+    const reachable = s => !lives.get(s.id).offline;
+    const expired = [];
+    const recipients = new Map();
+    const queue = (recipient, event, session, text) => {
+      state.messages.push(notice(recipient, event, session, text, at));
+      recipients.set(recipient.id, recipient);
+    };
+    for (const session of state.sessions) {
+      const live = lives.get(session.id);
+      if (live.online && session.offlineSince) {
+        const told = new Set(session.offlineNotified || []);
+        delete session.offlineSince;
+        delete session.offlineNotified;
+        for (const peer of state.sessions.filter(s => told.has(s.id) && reachable(s))) queue(peer, 'session-online', session, onlineText(session));
+      } else if (live.offline) {
+        if (!session.offlineSince) {
+          session.offlineSince = at;
+          // With no grace the removal notice covers this; two would be noise.
+          const told = ttl > 0 ? relatedSessions(state, session).filter(reachable) : [];
+          session.offlineNotified = told.map(s => s.id);
+          const removesAt = new Date(Date.parse(at) + ttl).toISOString();
+          for (const peer of told) queue(peer, 'session-offline', session, offlineText(session, removesAt));
+        }
+        if (Date.parse(at) - Date.parse(session.offlineSince) >= ttl) expired.push(session);
+      }
+    }
+    for (const recipient of this.removeSessions(state, expired, { notifyRelated: false })) recipients.set(recipient.id, recipient);
+    await this.store.save(state);
+    await this.deliverTo(state, [...recipients.values()]);
+    return state.sessions.length;
   }
 
   async sessions() {
     const state = await this.store.snapshot();
     return state.sessions.map(s => {
       const live = this.tmux.inspect(s);
-      return { ...s, availability: availabilityOf(s), online: live.online, status: live.online ? s.status : 'offline',
+      const presence = presenceOf(s, live, this.ttl());
+      return { ...s, availability: availabilityOf(s), presence, online: live.online,
+        status: live.online ? s.status : presence.state === 'offline' ? 'offline' : 'offline?',
         activity: state.observations?.[s.id]?.nodes?.[s.codex?.threadId]?.status,
         model: state.observations?.[s.id]?.nodes?.[s.codex?.threadId]?.model,
         error: live.error,
@@ -182,7 +269,7 @@ export class Service {
         const previous = state.messages.find(m => m.from === (sender?.id || 'person') && m.to === receiver.id && m.key === key);
         if (previous) {
           if (previous.text !== text || previous.replyTo !== replyTo) throw new Error('--key was already used for a different message.');
-          return { ...previous, receiverAvailability: availabilityOf(receiver) };
+          return { ...previous, receiverAvailability: availabilityOf(receiver), receiverPresence: this.presenceOf(receiver) };
         }
       }
       if (replyTo && !state.messages.some(m => m.id === replyTo && m.to === sender?.id)) {
@@ -196,19 +283,22 @@ export class Service {
       state.messages.push(message);
       await this.store.save(state);
       await this.deliverOne(state, receiver);
-      return { ...message, receiverAvailability: availabilityOf(receiver) };
+      return { ...message, receiverAvailability: availabilityOf(receiver), receiverPresence: this.presenceOf(receiver) };
     });
   }
+
+  presenceOf(session) { return presenceOf(session, this.tmux.inspect(session), this.ttl()); }
 
   async deliverOne(state, session) {
     if (!isAvailable(session)) return;
     const native = session.adapter === 'codex';
     if (native ? !session.codex || session.deliveryPaused : session.status !== 'ready') return;
-    if (state.messages.some(m => m.to === session.id && ['sending', 'uncertain'].includes(m.status))) return;
+    if (state.messages.some(m => m.to === session.id && blocksDelivery(m))) return;
     const message = state.messages.find(m => m.to === session.id && m.status === 'queued');
     if (!message || !this.tmux.inspect(session).online) return;
     // Commit before sending. A crash can leave 'sending', which requires
     // acknowledgement rather than blind replay and duplicate terminal input.
+    const previousStatus = session.status;
     if (!native) session.status = 'busy';
     session.updatedAt = now();
     message.status = 'sending';
@@ -233,6 +323,15 @@ export class Service {
     } catch (error) {
       const limit = native && codexLimit(error.data);
       if (limit) setLimit(session, limit, 'codex');
+      if (message.from === SYSTEM_SENDER) {
+        // Nobody asked for this delivery: keep it for the next ready, leave the
+        // recipient as it was, and never demand a confirmation from it.
+        session.status = previousStatus;
+        message.status = 'queued';
+        message.error = error.message;
+        await this.store.save(state);
+        return;
+      }
       // A failed read before queue invocation proves that no message was sent.
       // Errors from the queue process itself remain uncertain.
       message.status = limit && error.deliveryState === 'notSent' ? 'queued' : 'uncertain';
@@ -245,7 +344,7 @@ export class Service {
     return this.store.locked(async state => {
       const session = this.current(state, ref);
       if (!this.tmux.inspect(session).online) throw new Error('Session pane is offline or its binding has changed.');
-      if (status === 'ready' && state.messages.some(m => m.to === session.id && ['sending', 'uncertain'].includes(m.status))) {
+      if (status === 'ready' && state.messages.some(m => m.to === session.id && blocksDelivery(m))) {
         throw new Error('An earlier delivery is unconfirmed. Inspect dag inbox and acknowledge it before accepting another.');
       }
       session.status = status;
@@ -287,7 +386,7 @@ export class Service {
   async resume(ref) {
     return this.store.locked(async state => {
       const session = this.current(state, ref);
-      if (state.messages.some(m => m.to === session.id && ['sending', 'uncertain'].includes(m.status))) {
+      if (state.messages.some(m => m.to === session.id && blocksDelivery(m))) {
         throw new Error('An earlier delivery is unconfirmed. Inspect dag inbox and acknowledge it before resuming.');
       }
       session.availability = { state: 'available', source: 'manual', since: now() };

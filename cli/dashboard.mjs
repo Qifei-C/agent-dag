@@ -18,11 +18,12 @@ export async function dashboardState(service) {
   const l = await layout();
   const snapshot = await service.store.snapshot();
   const state = l.freshState(Date.now(), 'cards');
-  const online = new Map((await service.sessions()).map(s => [s.id, s.online]));
+  const views = new Map((await service.sessions()).map(s => [s.id, s]));
   for (const session of snapshot.sessions) {
     const observation = snapshot.observations?.[session.id];
     const root = observation?.nodes?.[session.codex?.threadId];
-    const isOnline = online.get(session.id);
+    const isOnline = views.get(session.id)?.online;
+    const offlineLabel = views.get(session.id)?.presence?.state === 'unknown' ? ' [unreachable]' : ' [offline]';
     const stale = !!observation?.error;
     const availability = availabilityOf(session);
     const pending = snapshot.messages.filter(m => m.to === session.id && m.status === 'queued').length;
@@ -30,7 +31,7 @@ export async function dashboardState(service) {
     const node = {
       ...state.nodes.main, ...root, id: session.id,
       parentId: snapshot.sessions.some(s => s.id === session.parentId) ? session.parentId : 'main',
-      label: `${session.name}${session.role ? ` (${session.role})` : ''}${hold ? ` [${availability.state}; queued ${pending}]` : ''}${!isOnline ? ' [offline]' : stale ? ' [telemetry unavailable]' : ''}`,
+      label: `${session.name}${session.role ? ` (${session.role})` : ''}${hold ? ` [${availability.state}; queued ${pending}]` : ''}${!isOnline ? offlineLabel : stale ? ' [telemetry unavailable]' : ''}`,
       availability, pending,
       deliveryNotice: hold ? `${availability.state}: ${availability.reason}${availability.retryAt ? `; expected reset ${availability.retryAt}` : ''}; dag resume ${session.name}` : undefined,
       type: 'session', status: !isOnline || stale ? 'waiting' : root?.status || 'idle',
